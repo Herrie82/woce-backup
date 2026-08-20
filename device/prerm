@@ -1,0 +1,38 @@
+#!/bin/sh
+#
+# prerm - removes the privileged helper. User backups under
+# /media/internal/webos-backups are deliberately left alone.
+#
+
+echo "woce-backup: removing the privileged helper..."
+
+stop woce-backupd 2>/dev/null && echo "  stopped woce-backupd" || true
+
+rm -f /usr/bin/woce-backupd.js
+
+# Drop the private-bus grant the daemon wrote for itself. Leaving a permissive
+# role behind for a service that is gone would be untidy at best.
+rm -f /var/palm/ls2/roles/prv/com.woce.backup.service.json
+
+# Our private copy of luna-send and the role that lets it claim
+# com.woce.backup.privileged, the identity mojodb.conf's admin grant (below)
+# is keyed on.
+rm -f /usr/bin/woce-lunacall
+rm -f /var/palm/ls2/roles/prv/woce-lunacall.json
+
+# mojodb.conf was edited directly, in place, since db8's admin trust has no API
+# to grant it. Restore the exact pre-edit bytes we saved before ever touching
+# it, rather than trying to pattern-match our own insertion back out.
+if [ -f /etc/palm/mojodb.conf.woce-backup-orig ]; then
+    mv /etc/palm/mojodb.conf.woce-backup-orig /etc/palm/mojodb.conf
+    echo "  restored mojodb.conf"
+fi
+rm -f /etc/event.d/woce-backupd
+rm -f /var/log/woce-backupd.log
+
+# Working area only - job files and staging scratch, never the backups.
+rm -rf /media/internal/.woce-backup/jobs
+rm -rf /media/internal/.woce-backup/stage
+
+echo "woce-backup: removal complete. Backups in /media/internal/webos-backups were kept."
+exit 0

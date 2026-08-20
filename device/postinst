@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# postinst - installs the privileged helper. Runs as root under ipkg, which
+# means Preware or WebOS Quick Install. palm-install runs as a non-root user
+# and will NOT execute this; the app still works in that case, just in limited
+# mode (see README).
+#
+
+APP_DIR="/media/cryptofs/apps/usr/palm/applications/com.woce.backup"
+NODE="/usr/palm/nodejs/node"
+
+echo "woce-backup: installing the privileged helper..."
+
+if [ ! -x "$NODE" ]; then
+    echo "  no node runtime at $NODE - skipping helper, app will run in limited mode"
+    exit 0
+fi
+
+# The helper must live outside the app bundle: /media/cryptofs is mounted
+# nosuid and the jail cannot reach it from the service side either.
+cp "$APP_DIR/device/woce-backupd.js" /usr/bin/woce-backupd.js
+chmod 755 /usr/bin/woce-backupd.js
+echo "  installed /usr/bin/woce-backupd.js"
+
+cp "$APP_DIR/device/woce-backupd.conf" /etc/event.d/woce-backupd
+chmod 644 /etc/event.d/woce-backupd
+echo "  installed the upstart job"
+
+# The working tree is shared with the jailed service; create it now so the
+# first backup does not race on it.
+mkdir -p /media/internal/.woce-backup/jobs
+mkdir -p /media/internal/.woce-backup/stage
+mkdir -p /media/internal/.woce-backup/manifests
+chmod -R 777 /media/internal/.woce-backup 2>/dev/null
+
+# Start straight away so no reboot is needed. No ls2 role file is installed:
+# /usr/share/ls2/roles/prv/com.palm.nodejs.json already grants the node binary
+# a privileged role with allowedNames ["*"], and /usr/share takes precedence
+# over /var/palm, so anything we dropped there would be ignored.
+# Stop before starting. `start` on a job that is already running is a no-op,
+# so an upgrade would leave the previous daemon serving the previous code —
+# which is exactly how "Unknown op: lunacall" happened after the op was added.
+stop woce-backupd 2>/dev/null >/dev/null && echo "  stopped the previous woce-backupd" || true
+
+# Belt and braces: upstart occasionally keeps the process after the job stops.
+pkill -f woce-backupd.js 2>/dev/null >/dev/null || true
+
+start woce-backupd 2>/dev/null && echo "  started woce-backupd" \
+    || echo "  woce-backupd will start on next boot"
+
+echo "woce-backup: install complete."
+exit 0

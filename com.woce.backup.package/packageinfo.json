@@ -1,0 +1,12 @@
+{
+    "id": "com.woce.backup",
+    "package_format_version": 2,
+    "loc_name": "Backup",
+    "version": "1.0.0",
+    "icon": "icon.png",
+    "miniicon": "icon.png",
+    "vendor": "webOS Community Edition",
+    "vendorurl": "https://webosarchive.org",
+    "app": "com.woce.backup",
+    "services": ["com.woce.backup.service"]
+}
