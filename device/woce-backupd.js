@@ -66,9 +66,9 @@ var exec = require('child_process').exec;
 // Rewritten by build.sh. Reported in the ping reply and logged by the
 // service, so "Root helper available, version X" says which daemon code is
 // actually live — upstart will not restart a running job on its own.
-var VERSION = "1.0.0+20260820-134946";
+var VERSION = "1.1.0+20260821-181327";
 
-var SERVICE_ID = "com.woce.backup.service";
+var SERVICE_ID = "com.palm.app.backup.service";
 
 var WORK_ROOT = "/media/internal/.woce-backup/";
 var JOB_ROOT  = WORK_ROOT + "jobs/";
@@ -217,20 +217,20 @@ function isWriteAllowed(dest) {
 
 /*
  * Installs our own copy of luna-send under its own identity, distinct from
- * com.woce.backup.service.
+ * com.palm.app.backup.service.
  *
  * It has to be a DIFFERENT name. The obvious design — have this tool present
- * itself AS com.woce.backup.service, so it rides on that name's existing
+ * itself AS com.palm.app.backup.service, so it rides on that name's existing
  * grants — does not work, and not for a permissions reason: ls-hubd treats an
  * allowedName as permanently owned by whichever role first claims it. Once
- * com.woce.backup.service.json (the main service's own role) lists that name,
+ * the role claiming com.palm.app.backup.service lists that name,
  * NO other executable can ever request it, regardless of whether the main
  * service is even running — confirmed on-device with the app fully closed:
  * every attempt still fails "Attempted to register for a service name that
  * already exists". A second role file for the same name is not a
  * looser-vs-stricter conflict to resolve; the name is just gone.
  *
- * So this tool is com.woce.backup.privileged instead — a name nothing else
+ * So this tool is com.palm.backup.privileged instead — a name nothing else
  * claims, with its own self-contained role (unlike the old design, this one
  * legitimately needs its own permissions block; there is no other file to
  * collide with).
@@ -242,7 +242,7 @@ function isWriteAllowed(dest) {
  */
 var LUNACALL_BIN      = "/usr/bin/woce-lunacall";
 var LUNACALL_ROLE     = "/var/palm/ls2/roles/prv/woce-lunacall.json";
-var LUNACALL_IDENTITY = "com.woce.backup.privileged";
+var LUNACALL_IDENTITY = "com.palm.backup.privileged";
 
 function ensureLunacallBinary() {
     var stock = "/usr/bin/luna-send";
@@ -301,7 +301,7 @@ function ensureLunacallRole() {
 }
 
 /*
- * Grants com.woce.backup.privileged the db8 "admin" role by editing
+ * Grants com.palm.backup.privileged the db8 "admin" role by editing
  * mojodb.conf directly — the only way in, since this trust has no putPermissions
  * equivalent. The file is JSON5-ish (comments, a trailing comma) so it is
  * edited as text, anchored on the last stock caller; a device whose file
@@ -514,7 +514,7 @@ ops.lunacall = function (job, done) {
     var quoted = "'" + payload.replace(/'/g, "'\\''") + "'";
     var uri = "palm://" + service + "/" + method;
 
-    // Prefer our own copy under com.woce.backup.privileged: db8 grants its
+    // Prefer our own copy under com.palm.backup.privileged: db8 grants its
     // "admin" role by caller name (see ensureDbAdminGrant), and only this
     // binary's role file may claim that identity. The stock luna-send is the
     // fallback for the window between install and the reboot that makes
@@ -619,9 +619,10 @@ ops.readRegistrations = function (job, done) {
 
 /**
  * Reboots the device after a restore, so restored preferences/db8 state that
- * only takes effect on the next boot (role files among them - see the
- * ensurePrivateBusRole note above) actually apply without the user having to
- * know that and do it themselves. Confirmed on-device that plain "reboot now"
+ * only takes effect on the next boot (the woce-lunacall role and the
+ * mojodb.conf admin grant among them - see ensureLunacallRole and
+ * ensureDbAdminGrant above) actually apply without the user having to know
+ * that and do it themselves. Confirmed on-device that plain "reboot now"
  * brings the system down; replying first and delaying the command a couple of
  * seconds gives the job result - and the Luna response built on it - time to
  * reach the app before the system actually goes.
@@ -932,68 +933,36 @@ function poll() {
     setTimeout(poll, POLL_INTERVAL);
 }
 
-/**
- * Gives this service private-bus outbound by writing its own ls2 role.
+/*
+ * There is deliberately no ensurePrivateBusRole() here any more.
  *
- * LunaSysMgr generates a role for every third-party JS service from
- * /usr/palm/ls2/templates/Triton.prv, which hardcodes "outbound": [] — the
- * service may register on the private bus but call nothing there. That is what
- * makes com.palm.db/internal/preBackup, the call the entire backup depends on,
- * come back as an unknown method.
+ * It used to write /var/palm/ls2/roles/prv/<service>.json granting our own
+ * service outbound: ["*"] on the private bus, because LunaSysMgr generates
+ * third-party JS service roles from /usr/palm/ls2/templates/Triton.prv, which
+ * hardcodes "outbound": [] — and without outbound, com.palm.db's
+ * internal/preBackup (the call the entire backup depends on) comes back as an
+ * unknown method.
  *
- * Services named com.palm.* get a permissive role instead. Measured on device:
- * com.palm.service.payment, a third-party service that ships no role of its
- * own, has outbound ["*"] on the private bus — while declaring
- * privateBusAccess:false, which incidentally proves palm_bus_config.json is
- * ignored. Rather than squat that namespace we write the same permissive role
- * under our own name; the hub reads whatever is in /var/palm/ls2/roles/prv.
+ * What that role was working around was the *name*. Measured on device:
+ * com.palm.service.payment, a third-party service shipping no role of its own,
+ * has outbound ["*"] while ours had []; the com.palm. prefix was the only
+ * differentiator. This service is now com.palm.app.backup.service, so it is on the
+ * permissive side of that rule by construction and the role file has nothing
+ * left to add.
  *
- * This lives in the daemon, not postinst, because LunaSysMgr rescans and
- * regenerates role files *after* the maintainer scripts run and would overwrite
- * it. The daemon starts after that. ls-hubd only reads roles at boot, so the
- * grant takes effect on the next reboot; until then the lunacall fallback
- * covers private-bus calls.
+ * Writing it anyway would not be merely redundant, it would be a hazard. The
+ * hub already has a generated role claiming this name, and a second role file
+ * naming the same service in its permissions block throws "Attempting to add
+ * duplicate service name to permission map" — which drops *both* grants, so the
+ * workaround would take out the thing it was working around. prerm no longer
+ * removes that file either, since we no longer create it.
+ *
+ * The db8 admin grant below is a different question and is still written; see
+ * ensureDbAdminGrant.
  */
-function ensurePrivateBusRole() {
-    var ROLE_PATH = "/var/palm/ls2/roles/prv/" + SERVICE_ID + ".json";
-    var wanted = JSON.stringify({
-        role: {
-            exeName: "js",
-            type: "regular",
-            allowedNames: [SERVICE_ID]
-        },
-        permissions: [{
-            service: SERVICE_ID,
-            inbound: ["*"],
-            outbound: ["*"]
-        }]
-    }, null, 4) + "\n";
-
-    var current = null;
-    try {
-        current = fs.readFileSync(ROLE_PATH, "utf8");
-    } catch (err) {
-        current = null;
-    }
-
-    if (current === wanted) {
-        log("private-bus role already in place");
-        return;
-    }
-
-    try {
-        mkdirsSync(path.dirname(ROLE_PATH));
-        fs.writeFileSync(ROLE_PATH, wanted);
-        log("wrote private-bus role " + ROLE_PATH + "; takes effect on next boot");
-    } catch (err) {
-        log("could not write " + ROLE_PATH + ": " + err.message +
-            " - private-bus calls will keep using the lunacall fallback");
-    }
-}
 
 function main() {
     log("starting, version " + VERSION + ", pid " + process.pid);
-    ensurePrivateBusRole();
     if (ensureLunacallBinary()) {
         ensureLunacallRole();
         ensureDbAdminGrant();

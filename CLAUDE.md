@@ -18,8 +18,10 @@ have to re-establish basics each time.
 
 ## Project Details
 
-**App ID:** `com.woce.backup`
-**Service ID:** `com.woce.backup.service`
+**App ID:** `com.palm.app.backup` — deliberately the *stock* app's id, so this
+installs as a replacement for the built-in Backup app rather than alongside it.
+**Service ID:** `com.palm.app.backup.service`
+**Package ID:** `com.palm.app.backup`
 **Framework:** Enyo 0.10 (TouchPad)
 **Target devices:** TouchPad (topaz); Pre 3 / Veer should work
 **webOS version(s):** 3.0.5
@@ -35,14 +37,23 @@ worth reading before making changes.
 ## App Structure
 
 ```
-com.woce.backup/            Enyo 0.10 app; close port of com.palm.app.backup,
-                            plus the restore flow ported from First Use
-com.woce.backup.service/    Node service; port of com.palm.service.backup with
-                            the cloud swapped for a pluggable target
-com.woce.backup.package/    packageinfo.json
-device/                     root helper daemon, upstart job, postinst/prerm
-tools/                      build (repack_ipk.py) and off-device test harness
+com.palm.app.backup/            Enyo 0.10 app; close port of the stock
+                                com.palm.app.backup, plus the restore flow
+                                ported from First Use
+com.palm.app.backup.service/    Node service; port of com.palm.service.backup
+                                with the cloud swapped for a pluggable target
+com.palm.app.backup.package/    packageinfo.json
+device/                         root helper daemon, upstart job, postinst/prerm
+tools/                          build (repack_ipk.py) and off-device harness
 ```
+
+Directory names are the ids, and the ids are constrained: **`palm-package`
+requires both the app id and every service id to be a subdomain of the package
+id** (`application id "X" must be subdomain of package id "Y"`, and the same
+message for services). That is why the service is `com.palm.app.backup.service`
+and not the stock `com.palm.service.backup` — the two stock ids share only
+`com.palm`, and claiming that as the package id would name the ipk after the
+entire Palm namespace. It is also why they all sit under one base name.
 
 Reference sources live in the 3.0.5 Doctor extract at
 `../touchpad/305doctor/resources/webOS/nova-cust-image-topaz.rootfs/`:
@@ -70,16 +81,28 @@ Reference sources live in the 3.0.5 Doctor extract at
   `/usr/palm/ls2/templates/Triton.prv`, which hardcodes `"outbound": []`. But
   `com.palm.service.payment` — third-party, in `/media/cryptofs/apps`, shipping
   no role of its own — has `outbound: ["*"]` on the private bus, while
-  `com.achunt.jukie.service`, `ca.canucksoftware.filemgr` and ours all have
-  `[]`. The `com.palm.` prefix is the only differentiator.
+  `com.achunt.jukie.service`, `ca.canucksoftware.filemgr` and ours all had
+  `[]`. The `com.palm.` prefix is the only differentiator — which the rename to
+  `com.palm.app.backup.service` puts us on the right side of, *if* the rule
+  really is a prefix test and not a fixed list. That has not been re-measured
+  since the rename; the `woce-lunacall` fallback below is what makes it safe
+  either way.
 - **`palm_bus_config.json` is ignored.** The payment service declares
   `privateBusAccess: false` and still got `outbound: ["*"]`; we declare `true`
   and got `[]`. Do not reason from that file.
-- **The daemon writes our own prv role** (`ensurePrivateBusRole`) rather than
-  squatting `com.palm.*`. It must be the daemon, not `postinst`: LunaSysMgr
-  rescans and regenerates role files *after* the maintainer scripts run. Roles
-  are read by `ls-hubd` only at boot, so the grant lands on the next reboot;
-  until then `lunacall` covers private-bus calls.
+- **The daemon no longer writes a prv role for our own service, and must not
+  start again.** `ensurePrivateBusRole` used to write
+  `/var/palm/ls2/roles/prv/<service>.json` granting ourselves `outbound: ["*"]`,
+  because the generated third-party role hardcodes `[]`. Under the
+  `com.palm.*` name that grant should now come for free — but the reason to
+  delete it rather than leave it as harmless insurance is that it is *not*
+  harmless: the hub already has a generated role claiming this name, and a
+  second role file naming the same service in its `permissions` block throws
+  `Attempting to add duplicate service name to permission map`, **which drops
+  both grants**. The workaround would take out the thing it was working
+  around. `prerm` no longer deletes that file either, since nothing creates it.
+  The `woce-lunacall` role is a different file for a different name and is
+  still written.
 - **The service is on the PUBLIC bus.** `palm_bus_config.json` is not honoured
   for third-party services. A service is reachable there only if it has a file
   in `/usr/share/dbus-1/services` (36 of them) — *not*
@@ -114,8 +137,9 @@ Reference sources live in the 3.0.5 Doctor extract at
   files rather than assumed from the shape looking plausible. Removed; see the
   entry below for the grant that actually works.
 - **An `allowedNames` entry is a permanent, exclusive claim — not a grant two
-  executables can share.** Once `com.woce.backup.service.json` (the main
-  service's own role, `exeName: "js"`) lists `com.woce.backup.service`, no
+  executables can share.** Once a role (`exeName: "js"`) lists
+  `com.palm.app.backup.service` — and LunaSysMgr generates exactly such a role
+  for every third-party JS service, so one always exists — no
   *other* executable can ever request that name — confirmed on-device with the
   app fully closed: every attempt still fails `Attempted to register for a
   service name that already exists`, so it is not a live-process race. A
@@ -123,12 +147,12 @@ Reference sources live in the 3.0.5 Doctor extract at
   throw its own error (`Attempting to add duplicate service name to permission
   map`, dropping both grants), but fixing that JSON was not enough — the name
   itself is unavailable to any second claimant regardless. `woce-lunacall`
-  therefore runs as its own identity, `com.woce.backup.privileged`, which
+  therefore runs as its own identity, `com.palm.backup.privileged`, which
   nothing else claims.
 - **db8's admin-role grant has no API — mojodb.conf is edited directly.**
   Unlike per-kind permissions (`putPermissions`, install-time), the admin-role
   caller list is a hardcoded array with no configurator equivalent. The daemon
-  inserts `com.woce.backup.privileged` into it by anchored string replacement
+  inserts `com.palm.backup.privileged` into it by anchored string replacement
   (the file is JSON5-ish: comments, a trailing comma, so it's edited as text,
   not parsed) and saves the pre-edit bytes to `mojodb.conf.woce-backup-orig`
   once, so `prerm` restores the original file exactly rather than trying to
@@ -174,7 +198,7 @@ Reference sources live in the 3.0.5 Doctor extract at
   proved they were gone. Any future top-level manifest field that references a
   stored file needs a matching line in `getReferencedFiles()`.
 - **"Has this backup been restored" lives on the manifest, not in this
-  device's `com.woce.backup.prefs`.** The obvious first instinct is prefs,
+  device's `com.palm.backup.prefs`.** The obvious first instinct is prefs,
   since that's where every other piece of local state already lives - but
   restored-ness is a property of *that backup*, and putting it in the
   manifest means it survives a delete-and-recreate of prefs, shows up from
@@ -326,7 +350,7 @@ Reference sources live in the 3.0.5 Doctor extract at
   dialog stayed visible through its close transition, so a second tap in that
   window re-entered `startRestore()` before the first call's response had come
   back. The result was two independent `RestoringPage` runs, each with its own
-  `com.palm.filecache` tempDir, racing to claim `com.woce.backup.privileged`
+  `com.palm.filecache` tempDir, racing to claim `com.palm.backup.privileged`
   on the private bus — the exact same "already exists" collision documented
   above, just for the restore identity instead of the backup one, and with no
   malformed role file this time to explain it. `RestoringPage.startRestore`
@@ -390,7 +414,7 @@ Reference sources live in the 3.0.5 Doctor extract at
   it only blocks a re-tap in the first fraction of a second, not for a
   restore's whole duration. Confirmed on-device: two `restore` Luna calls for
   the identical manifest, 7 seconds apart, both accepted and racing for the
-  `com.woce.backup.privileged` bus identity — the exact "already exists"
+  `com.palm.backup.privileged` bus identity — the exact "already exists"
   collision documented above, just between two of this app's own `lunacall`
   invocations instead of two different binaries, and this time a genuine
   runtime race (two live processes wanting the same connection name at once)
@@ -475,12 +499,12 @@ Reference sources live in the 3.0.5 Doctor extract at
   would be far more disruptive than the second or two of stale data it would
   be covering.
 - **The service creates its db8 kind lazily.** Watching
-  `com.woce.backup.prefs:1` before any service call has touched prefs fails with
+  `com.palm.backup.prefs:1` before any service call has touched prefs fails with
   `kind not registered`. Call something that reads prefs first.
 - **A throw outside a future kills the service silently.** Foundations catches
   anything thrown inside a `.then` callback, but a throw from an `fs`,
   `setTimeout` or `child_process` callback is outside its reach: the process
-  dies, the log just stops, and the next call says "com.woce.backup.service is
+  dies, the log just stops, and the next call says "com.palm.service.backup is
   not running". `prologue.js` installs an `uncaughtException` handler so it at
   least says FATAL first. Never call `.then(this, ...)` from inside a plain
   node callback — `this` is not your object there, and Foundations asserts its
@@ -533,17 +557,91 @@ Reference sources live in the 3.0.5 Doctor extract at
 - **Registration files need trimming before `JSON.parse`.** The stock
   `com.palm.keymanager` ends with `}` plus four spaces, which node 0.2 rejects.
 - **Backups are deliberately unencrypted.** Do not "fix" this; see README.
+- **We install under the stock app's id, and the stock app is still there.**
+  Ours lands in `/media/cryptofs/apps/usr/palm/applications/com.palm.app.backup`;
+  the original is in `/usr/palm/applications/com.palm.app.backup`, on a
+  read-only partition we cannot and do not touch. LunaSysMgr scans both at boot
+  and parses each `appinfo.json` it finds, so two directories now claim the same
+  id. That is the standard override trick on this platform and is why the id was
+  taken, but it has **not been verified on device which one wins** — check that
+  the launcher icon opens this app before concluding anything else is broken.
+  The service ids do not collide (`com.palm.app.backup.service` vs the stock
+  `com.palm.service.backup`), so the dead stock service is never in the way.
+- **`new Future(err)` is a SUCCESSFUL future carrying an Error.** Foundations'
+  constructor is `this._result = { result: result, exception: undefined, isset:
+  arguments.length > 0 }` — no special case for `Error`. `LocalTarget.get` and
+  `putFile` both did this on a rejected path and every caller sailed past its
+  error check: `storeFile` recorded the file in `storedFileMap` and in the
+  manifest as stored, when nothing had been written. Use `failedFuture(err)`
+  from `common.js`.
+- **Foundations' `then` DOES nest a value the callback returns.**
+  `_maybeDispatch` ends with `if (v !== undefined) { if (v && typeof v.then ===
+  "function") { this.nest(v); } else { this.setResult(v); } }`, and `now()` and
+  `callback()` do the same. So `return someFuture;` from a `then` callback is
+  equivalent to `f.nest(someFuture)` — `system.getDeviceStatus` relies on it.
+  Read from the real `future.js`, not inferred. The codebase uses `f.nest()`
+  everywhere else and should keep doing so, but a `return` is not a bug.
+- **A fixed timeout wrapped around a helper op that loops over packages is a
+  cap on how many packages get processed.** The helper handles them one at a
+  time with a 60s command timeout *each*. Archiving was wrapped in a flat 60s
+  and reinstalling in plain `tolerate()`'s generic 20s, so on any real device
+  the wrapper always won: every app came back `archived: false`, and on restore
+  every app was reported as needing a manual reinstall *while ipkg was still
+  installing it* — and then the staging directory was deleted out from under
+  the running installs. Use `packageOpBudget(count)` (`common.js`), and if a
+  package op does time out, do **not** clean up the staging directory: see
+  `packageOpTimedOut` in `handlers/restore.js`.
+- **`purge` trims only THIS device's manifests; the orphan sweep still reads
+  every manifest.** That asymmetry is deliberate and load-bearing. A target is
+  shared ground — the README tells people to copy backups between devices — and
+  an unscoped trim meant `manifestsToKeep` counted every manifest present and
+  deleted the lexicographically lowest, so importing ten backups from an old
+  phone and running one backup here deleted them. The sweep staying unscoped is
+  what keeps another device's files referenced and alive.
+- **A subscribing assistant can implement `cancelSubscription()`.** The service
+  framework calls it: `controller_command.js` has `if
+  (this.assistant.cancelSubscription) { this.assistant.cancelSubscription(); }`.
+  Without it `getBackupStatus` only ever added status listeners — the app
+  re-subscribes from `refreshAll` on every window activation and again from
+  `startBackup`, and `clearStatusListeners()` only runs at Complete/Failed.
+- **`fileUtil.cp` is the copy path for every stored and restored file, and
+  must honour backpressure.** `reader.on("data", buf => writer.write(buf))`
+  ignoring the return value queues everything the write side has not flushed.
+  Fine for a db8 dump, fatal for the media categories. `pause()` on a `false`
+  from `write()`, `resume()` on `drain`. The root helper's `copyFileSync`
+  already read and wrote in bounded 64K chunks for this reason.
+- **Walking `/media/internal` must yield the event loop.** `getEstimate` ran a
+  synchronous recursive walk plus a `statSync` per file, and
+  `getUserDataCategories` is called on app launch *and* every window
+  activation. The service is single-threaded, so that stalled everything else
+  including a running backup's progress. `walkAsync` in `util/user-data.js` is
+  an explicit stack with a per-tick budget, and results are cached for
+  `SCAN_TTL`. Do not "simplify" it back to recursion.
+- **A backup checks free space before it starts** (`checkFreeSpace` in
+  `handlers/backup.js`, failing with `type: "SPACE"` which `BackupApp` shows).
+  Both targets had implemented `getSpace()` from the beginning and nothing ever
+  called it. Only a *full* run is checked against the media estimate — an
+  incremental one re-references what is already stored rather than copying it,
+  so demanding room for the whole library again would refuse backups that would
+  have completed fine. A target that reports `free: null` is allowed through.
+- **There is no auto-restore shortcut any more, and adding one back would be a
+  mistake.** First Use skipped the picker when the target held exactly one
+  backup, which was right there — the device had just been wiped. Ported here
+  it meant "Restore a backup..." from the app menu was two taps from
+  overwriting a working device's accounts and settings, with no prompt
+  anywhere. `ChooseBackupPage` now confirms the choice, the same way
+  `BackupListPage` always has.
 
 ## Services
 
-Ships a Node service (`com.woce.backup.service`) plus an optional root helper
-(`device/woce-backupd.js`) installed by `postinst`. Without the helper the app
-runs in limited mode and says so.
+Ships a Node service (`com.palm.app.backup.service`) plus an optional root
+helper (`device/woce-backupd.js`) installed by `postinst`. Without the helper
+the app runs in limited mode and says so.
 
 ## Useful Commands
 
 ```bash
-# Build (produces build/com.woce.backup_1.0.0_all.ipk)
+# Build (produces build/com.palm.app.backup_1.1.0_all.ipk)
 ./build.sh
 
 # Off-device engine tests; VERBOSE=1 for the service's own logging.
@@ -554,20 +652,20 @@ node tools/test/run-tests.js
 node tools/lint-enyo.js
 
 # Install — Preware or WebOS Quick Install, NOT palm-install (postinst needs root)
-palm-install build/com.woce.backup_1.0.0_all.ipk   # limited mode only
+palm-install build/com.palm.app.backup_1.1.0_all.ipk   # limited mode only
 
 # Reinstalling does NOT restart a running node service — it keeps serving the
 # old code. Always kill it first, or you will debug the previous build.
-novacom run file://bin/sh -c "pkill -f com.woce.backup.service"
+novacom run file://bin/sh -c "pkill -f com.palm.app.backup.service"
 
 # Launch and watch logs
-palm-launch com.woce.backup && palm-log -f com.woce.backup
+palm-launch com.palm.app.backup && palm-log -f com.palm.app.backup
 
 # Poke the service directly
-luna-send -n 1 -f palm://com.woce.backup.service/getBackupStatus '{}'
-luna-send -n 1 -f palm://com.woce.backup.service/startBackup '{"full":true}'
+luna-send -n 1 -f palm://com.palm.app.backup.service/getBackupStatus '{}'
+luna-send -n 1 -f palm://com.palm.app.backup.service/startBackup '{"full":true}'
 
 # Quick file push during active development
-novacom put file:///media/cryptofs/apps/usr/palm/applications/com.woce.backup/source/BackupApp.js \
-  < com.woce.backup/source/BackupApp.js
+novacom put file:///media/cryptofs/apps/usr/palm/applications/com.palm.app.backup/source/BackupApp.js \
+  < com.palm.app.backup/source/BackupApp.js
 ```

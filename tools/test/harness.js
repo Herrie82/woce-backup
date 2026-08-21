@@ -20,7 +20,7 @@ var vm   = require('vm');
 
 var Future = require('./future');
 
-var SERVICE_DIR = path.join(__dirname, "..", "..", "com.woce.backup.service");
+var SERVICE_DIR = path.join(__dirname, "..", "..", "com.palm.app.backup.service");
 
 /* The device runs node 0.2, where existence checks live on `path`. Modern node
  * moved them to `fs` and then deleted them outright. The service is written for
@@ -377,8 +377,8 @@ function runAssistant(context, assistantName, args, subscriptionSink) {
     assistant.controller = {
         args: args || {},
         message: {
-            senderServiceName: function () { return "com.woce.backup.test"; },
-            applicationID: function () { return "com.woce.backup.test"; }
+            senderServiceName: function () { return "com.palm.backup.test"; },
+            applicationID: function () { return "com.palm.backup.test"; }
         }
     };
 

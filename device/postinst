@@ -6,7 +6,7 @@
 # mode (see README).
 #
 
-APP_DIR="/media/cryptofs/apps/usr/palm/applications/com.woce.backup"
+APP_DIR="/media/cryptofs/apps/usr/palm/applications/com.palm.app.backup"
 NODE="/usr/palm/nodejs/node"
 
 echo "woce-backup: installing the privileged helper..."

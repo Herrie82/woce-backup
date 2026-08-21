@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Builds com.woce.backup_<version>_all.ipk from the three package directories.
+# Builds com.palm.app.backup_<version>_all.ipk from the three package directories.
 #
 # palm-package only writes a control.tar.gz containing ./control, so the
 # maintainer scripts are injected afterwards by tools/repack_ipk.py.
@@ -9,9 +9,9 @@ set -e
 
 cd "$(dirname "$0")"
 
-APP="com.woce.backup"
-SERVICE="com.woce.backup.service"
-PACKAGE="com.woce.backup.package"
+APP="com.palm.app.backup"
+SERVICE="com.palm.app.backup.service"
+PACKAGE="com.palm.app.backup.package"
 OUT="build"
 
 # The SDK is at a different path on each host, and on Windows it is a .bat.
@@ -61,7 +61,7 @@ BUILD_ID="$VERSION+$(date +%Y%m%d-%H%M%S)"
 echo "Stamping build $BUILD_ID..."
 "$PYTHON" - "$BUILD_ID" <<'STAMP'
 import re, sys
-path = "com.woce.backup.service/assistants/service-assistant.js"
+path = "com.palm.app.backup.service/assistants/service-assistant.js"
 src = open(path, encoding="utf-8").read()
 src = re.sub(r'var SERVICE_BUILD = "[^"]*";',
              'var SERVICE_BUILD = "%s";' % sys.argv[1], src)

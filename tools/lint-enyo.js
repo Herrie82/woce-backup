@@ -17,7 +17,7 @@
 var fs   = require('fs');
 var path = require('path');
 
-var APP_DIR = path.join(__dirname, "..", "com.woce.backup");
+var APP_DIR = path.join(__dirname, "..", "com.palm.app.backup");
 
 // Properties that start with "on" but hold a caption rather than a handler
 // name, so a quoted value is data and not a method reference.

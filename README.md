@@ -56,7 +56,9 @@ Everything the stock backup did, because it asks the same services:
   device at restore time, not against what was installed when the backup was
   made.
 
-Plus, optionally, user media from `/media/internal` — photos, videos, music,
+A backup checks that there is room before it starts, and refuses with a clear
+message rather than failing somewhere in the middle. Plus, optionally, user
+media from `/media/internal` — photos, videos, music,
 documents, downloads, ringtones — as individually selectable categories. These
 are **off by default**: a local backup is written to the same volume the media
 lives on, so including them uses storage twice over. The "What to back up"
@@ -96,13 +98,37 @@ your threat model, copy the backup somewhere safe and delete it from the device.
 
 ---
 
+## It installs as the stock Backup app
+
+The app id is `com.palm.app.backup` — the id the built-in Backup app uses. The
+package installs to `/media/cryptofs/apps/usr/palm/applications/com.palm.app.backup`,
+while the original stays where it is on the read-only system partition. Two
+directories then claim the same id, which is the usual way an app is overridden
+on this platform, and it is why the id was taken rather than a fresh one
+invented.
+
+The service could not take the stock service's id to match. `palm-package`
+requires the app id *and* every service id to be a subdomain of the package id,
+and `com.palm.app.backup` and `com.palm.service.backup` share only `com.palm` —
+naming the package after the whole Palm namespace to satisfy that would be
+worse than the alternative. So the service is `com.palm.app.backup.service`,
+which is still `com.palm.`-prefixed, which is the part that matters for
+private-bus access. The dead stock service keeps its own name and is simply
+never called.
+
+```
+package   com.palm.app.backup
+app       com.palm.app.backup           (same id as the stock app)
+service   com.palm.app.backup.service
+```
+
 ## Installing
 
 ```bash
 ./build.sh
 ```
 
-Produces `build/com.woce.backup_1.0.0_all.ipk`. Needs the Palm/HP webOS SDK for
+Produces `build/com.palm.app.backup_1.1.0_all.ipk`. Needs the Palm/HP webOS SDK for
 `palm-package`, and Python 3 to inject the maintainer scripts (`palm-package`
 writes a `control.tar.gz` containing only `./control`).
 
@@ -189,35 +215,43 @@ third-party JS service with `"outbound": []` hardcoded — measured on device,
 `com.palm.*`-named services get a permissive role instead, regardless of
 where they're installed from or what they declare. Without matching that, the
 one call the entire backup depends on, `com.palm.db/internal/preBackup`,
-comes back as an unknown method. The daemon writes that role for its own name
-at every startup (`ensurePrivateBusRole` in `device/woce-backupd.js`), along
-with the role for its private `luna-send` copy and a direct edit to
-`/etc/palm/mojodb.conf` granting db8's admin role — see the top of that file
-for why each is needed and why none of them have a real API to request
-through instead.
+comes back as an unknown method.
 
-All three are written to disk immediately, during `postinst`'s own first
-start of the daemon — nothing to run by hand. But `ls-hubd` and `mojodb-luna`
-each read their configuration once, at their own startup, not on every
-change to the file — so **the very first install needs one reboot**
-afterward before the grants actually take effect. `woce-lunacall` (used
-automatically whenever a direct private-bus call comes back "unknown method")
-covers some of that gap even before the reboot, but it depends on its own
-role file, freshly written by that same first daemon start — not
-independently confirmed here how much works in the narrow window before the
-first reboot ever happens, so treat that reboot as the actual last install
-step rather than an optional cleanup. An upgrade over an existing install
-doesn't need another reboot — the grants from the first install are already
-in place.
+Naming the service `com.palm.app.backup.service` should put it on the
+permissive side of that rule by itself. The daemon used to write a role of our
+own to force it, and deliberately no longer does: the hub already has a
+generated role claiming this name, and a second role file naming the same
+service in its `permissions` block throws *"Attempting to add duplicate service
+name to permission map"* — which drops **both** grants. The workaround would
+take out the thing it was working around.
+
+What the daemon still writes at every startup is the role for its private
+`luna-send` copy (`woce-lunacall`, running as `com.palm.backup.privileged`) and
+a direct edit to `/etc/palm/mojodb.conf` granting that name db8's admin role —
+see the top of `device/woce-backupd.js` for why each is needed and why neither
+has a real API to request through instead. That pair is also the fallback if
+the prefix rule turns out not to work the way it was measured: whenever a
+direct private-bus call comes back "unknown method", the call is retried
+through the helper.
+
+Both are written to disk immediately, during `postinst`'s own first start of
+the daemon — nothing to run by hand. But `ls-hubd` and `mojodb-luna` each read
+their configuration once, at their own startup, not on every change to the
+file — so **the very first install needs one reboot** afterward before the
+grants actually take effect. It is not independently confirmed here how much
+works in the narrow window before that first reboot, so treat the reboot as the
+actual last install step rather than an optional cleanup. An upgrade over an
+existing install doesn't need another reboot — the grants from the first
+install are already in place.
 
 ---
 
 ## Layout
 
 ```
-com.woce.backup/            Enyo 0.10 app (the UI)
-com.woce.backup.service/    Node service (the engine)
-com.woce.backup.package/    packageinfo.json tying them together
+com.palm.app.backup/            Enyo 0.10 app (the UI)
+com.palm.app.backup.service/    Node service (the engine)
+com.palm.app.backup.package/    packageinfo.json tying them together
 device/                     root helper, upstart job, postinst/prerm
 tools/                      build and test tooling
 ```
@@ -227,7 +261,9 @@ flow brought over from First Use — where restore lived on stock webOS, meaning
 you had to wipe the device to reach it. Screens the original did not have
 (backup list, destination picker, category selection) sit below the original
 layout rather than rearranging it. From that list, a backup can be deleted as
-well as restored — tap a backup for the option, or swipe it. A restored
+well as restored — tap a backup for the option, or swipe it. Restoring always
+asks first, whichever way you reach it: the picker confirms the backup you
+tapped before anything is overwritten. A restored
 backup is marked as such, with when it was last restored — recorded on the
 manifest itself, so it shows up from any device reading the same target, not
 just the one that ran the restore.
@@ -247,7 +283,7 @@ is visible mid-populate.
 
 ### The target abstraction
 
-`com.woce.backup.service/targets/` is the seam for cloud support. `TargetBase`
+`com.palm.app.backup.service/targets/` is the seam for cloud support. `TargetBase`
 declares the same method set the stock service's `Storage` class used against
 Palm's servers:
 
@@ -303,8 +339,8 @@ What this cannot cover is the Luna bus and the jail. Those need a device.
 ### On-device checks
 
 ```bash
-luna-send -n 1 -f palm://com.woce.backup.service/getBackupStatus '{}'
-luna-send -n 1 -f palm://com.woce.backup.service/startBackup '{"full":true}'
+luna-send -n 1 -f palm://com.palm.app.backup.service/getBackupStatus '{}'
+luna-send -n 1 -f palm://com.palm.app.backup.service/startBackup '{"full":true}'
 tail -f /var/log/messages | grep woce
 cat /var/log/woce-backupd.log
 ```

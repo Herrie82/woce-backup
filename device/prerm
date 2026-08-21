@@ -10,12 +10,8 @@ stop woce-backupd 2>/dev/null && echo "  stopped woce-backupd" || true
 
 rm -f /usr/bin/woce-backupd.js
 
-# Drop the private-bus grant the daemon wrote for itself. Leaving a permissive
-# role behind for a service that is gone would be untidy at best.
-rm -f /var/palm/ls2/roles/prv/com.woce.backup.service.json
-
 # Our private copy of luna-send and the role that lets it claim
-# com.woce.backup.privileged, the identity mojodb.conf's admin grant (below)
+# com.palm.backup.privileged, the identity mojodb.conf's admin grant (below)
 # is keyed on.
 rm -f /usr/bin/woce-lunacall
 rm -f /var/palm/ls2/roles/prv/woce-lunacall.json
