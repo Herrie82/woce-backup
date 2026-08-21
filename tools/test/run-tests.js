@@ -17,6 +17,11 @@ var vm   = require('vm');
 var harness = require('./harness');
 var Future  = harness.Future;
 
+// Each loaded service context installs prologue.js's uncaughtException handler,
+// and the suite loads a fresh one per scenario. That is correct on device (one
+// process, one handler) and only looks like a leak here.
+process.setMaxListeners(0);
+
 var passed = 0;
 var failed = 0;
 
@@ -246,6 +251,20 @@ function run(context, assistant, args, sink) {
             resolve({ error: err, result: result });
         });
     });
+}
+
+/**
+ * The names a manifest's file descriptors resolve to in the content-addressed
+ * store — the same rule as backup.getServerFilename.
+ */
+function storedNamesOf(manifest) {
+    var names = [];
+    (manifest.services || []).forEach(function (service) {
+        (service.files || []).forEach(function (file) {
+            names.push((file.checksum || file.origChecksum) + (file.compressed ? ".gz" : ""));
+        });
+    });
+    return names;
 }
 
 function manifestDir() { return path.join(ROOT, "backups", "manifests"); }
@@ -922,7 +941,7 @@ async function main() {
     // running - well past the point any client-side re-entry guard could
     // still be blocking it - raced the first one's own lunacall fallback and
     // collided ("Attempted to register for a service name that already
-    // exists: com.woce.backup.privileged"). Reproduced here as two calls
+    // exists: com.palm.backup.privileged"). Reproduced here as two calls
     // fired back to back, neither awaited before the other starts; both
     // reach RestoreAssistant.run() before either can finish.
     var firstRestore  = run(pkgCtx, "RestoreAssistant",
@@ -1064,6 +1083,102 @@ async function main() {
     check("no manifest is left behind by a failed backup",
         listFilesIn(manifestDir()).length === 0,
         listFilesIn(manifestDir()).join(","));
+
+    /* ---- free space ---- */
+    section("Free space");
+
+    // Both targets have implemented getSpace() from the start and nothing ever
+    // called it, so a full volume surfaced as a backup that ran for a while and
+    // then failed somewhere in the middle.
+    buildSandbox();
+    var spaceContext = newContext();
+    vm.runInContext(
+        "LocalTarget.prototype.getSpace = function () {" +
+        "  var f = new Future();" +
+        "  setTimeout(function () { f.result = { free: 1024, total: 1024 * 1024 * 1024 }; }, 0);" +
+        "  return f;" +
+        "};", spaceContext);
+
+    var spaceRun = await run(spaceContext, "BackupAssistant", { full: true }, []);
+    check("a backup that cannot possibly fit is refused up front",
+        !!spaceRun.error && /Not enough free space/.test(spaceRun.error.message),
+        spaceRun.error ? spaceRun.error.message : "no error raised");
+
+    var spaceStatus = vm.runInContext("backup.getStatus()", spaceContext);
+    check("and reports type SPACE, so the app can say why",
+        spaceStatus && spaceStatus.STATUS === "Failed" && spaceStatus.type === "SPACE",
+        JSON.stringify(spaceStatus));
+    check("no manifest is written for a backup refused on space",
+        listFilesIn(manifestDir()).length === 0,
+        listFilesIn(manifestDir()).join(","));
+
+    // A target that cannot measure itself must not block backups — that is the
+    // honest answer for a future network target.
+    buildSandbox();
+    var unknownSpaceContext = newContext();
+    vm.runInContext(
+        "LocalTarget.prototype.getSpace = function () {" +
+        "  var f = new Future();" +
+        "  setTimeout(function () { f.result = { free: null, total: null }; }, 0);" +
+        "  return f;" +
+        "};", unknownSpaceContext);
+    var unknownSpaceRun = await run(unknownSpaceContext, "BackupAssistant", { full: true }, []);
+    check("a target that cannot report free space still backs up",
+        !unknownSpaceRun.error && unknownSpaceRun.result &&
+            unknownSpaceRun.result.STATUS === "Complete",
+        unknownSpaceRun.error && unknownSpaceRun.error.message);
+
+    /* ---- purge is scoped to this device ---- */
+    section("Purge across devices");
+
+    // The README tells people to copy backups off one device and onto another.
+    // Trimming to manifestsToKeep used to count every manifest in the target and
+    // delete the lexicographically lowest, so importing another device's
+    // backups and then running one backup here deleted them.
+    buildSandbox();
+    var shareContext = newContext();
+    vm.runInContext("prefs.set({ manifestsToKeep: 1 });", shareContext);
+
+    var shared1 = await run(shareContext, "BackupAssistant", { full: true }, []);
+    check("first backup on the shared target succeeds",
+        !shared1.error && shared1.result && shared1.result.STATUS === "Complete",
+        shared1.error && shared1.error.message);
+
+    var ours = JSON.parse(fs.readFileSync(path.join(manifestDir(), "000001-abc123"), "utf8"));
+    var foreignFiles = storedNamesOf(ours);
+    check("the first backup stored files to protect", foreignFiles.length > 0);
+
+    // Another device's backup, dropped into the target the way copying one over
+    // USB would. It references the files that exist right now, so after our own
+    // older manifest is trimmed those files are referenced by it alone.
+    var foreign = JSON.parse(JSON.stringify(ours));
+    foreign.deviceInfo.nduId = "otherdev";
+    foreign.deviceInfo.deviceName = "Someone else's TouchPad";
+    fs.writeFileSync(path.join(manifestDir(), "000009-otherdev"),
+        JSON.stringify(foreign, null, 2));
+
+    // Different content, so our second backup does not simply reference the
+    // same stored files and make the check vacuous.
+    state.settingsPayload = '{"theme":"light","volume":3,"extra":"changed"}';
+    state.notesPayload = "a completely different note\n";
+
+    var shared2 = await run(shareContext, "BackupAssistant", { full: true }, []);
+    check("second backup on the shared target succeeds",
+        !shared2.error && shared2.result && shared2.result.STATUS === "Complete",
+        shared2.error && shared2.error.message);
+
+    var afterPurge = listFilesIn(manifestDir());
+    check("the other device's backup survives our purge",
+        afterPurge.indexOf("000009-otherdev") !== -1, afterPurge.join(","));
+    check("our own older backup is still trimmed to manifestsToKeep",
+        afterPurge.indexOf("000001-abc123") === -1, afterPurge.join(","));
+
+    var storedAfter = listFilesIn(fileStoreDir());
+    var foreignSurvived = foreignFiles.every(function (name) {
+        return storedAfter.indexOf(name) !== -1;
+    });
+    check("and the files only the other device's manifest references are not swept",
+        foreignSurvived, "want " + foreignFiles.join(",") + " in " + storedAfter.join(","));
 
     /* ---- summary ---- */
     console.log("\n" + passed + " passed, " + failed + " failed");

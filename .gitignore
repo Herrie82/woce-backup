@@ -1,4 +1,4 @@
 build/
-com.woce.backup/device/
+com.palm.app.backup/device/
 *.ipk
 __pycache__/

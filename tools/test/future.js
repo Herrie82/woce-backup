@@ -97,7 +97,7 @@ Future.prototype.settle = function (callback) {
         var hasResult = self._result ? self._result.isset : self._hasResult;
         var pending = self._then ? self._then.length : self._callbacks.length;
         var exception = self._result ? self._result.exception : self._exception;
-        var result = self._result ? self._result.result : self._result;
+        var result = self._result ? self._result.result : self._resultValue;
         return { done: hasResult && pending === 0, exception: exception, result: result };
     };
 

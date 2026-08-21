@@ -1,3 +1,79 @@
+# woce-backup 1.1.0
+
+*2026-08-21*
+
+Installs as a replacement for the built-in Backup app, and fixes a run of
+defects found in a review of 1.0.0.
+
+## It now takes over the stock app's id
+
+```
+package   com.palm.app.backup
+app       com.palm.app.backup           (same id as the stock app)
+service   com.palm.app.backup.service
+```
+
+The service could not also take `com.palm.service.backup`: `palm-package`
+requires the app id and every service id to be a subdomain of the package id,
+and the two stock ids share only `com.palm`. The service name is still
+`com.palm.`-prefixed, which is the part that governs private-bus access.
+
+Because the daemon no longer needs to force a private-bus role for our own
+name — and writing one alongside the hub's generated role would throw
+*"duplicate service name to permission map"* and drop **both** grants — that
+step is gone. The `woce-lunacall` identity and the `mojodb.conf` admin grant
+stay, as the fallback.
+
+## Fixed
+
+- **Automatic app reinstall almost never reported success.** Fetching and
+  reinstalling archived `.ipk`s was wrapped in a generic 20s timeout, against a
+  helper that budgets 60s *per package*; archiving had a flat 60s for the whole
+  set. In practice every app came back listed as "could not be reinstalled
+  automatically" while ipkg was still installing it — and the staging directory
+  was then deleted out from under the running installs. Budgets now scale with
+  the package count, and the staging cleanup is skipped if an operation is
+  still running.
+- **A rejected path was reported as a completed write.** `new Future(err)` is a
+  *successful* future carrying an Error in Foundations, so a file that was
+  never written was recorded in the manifest as stored — poisoning later
+  incremental backups that deduped against it.
+- **Backing up could delete another device's backups.** Trimming to
+  `manifestsToKeep` counted every manifest in the target, not just this
+  device's, so importing backups from another device and running one backup
+  here deleted the imported ones.
+- **Restoring no longer starts without asking.** With exactly one backup
+  present, the picker was skipped and "Restore a backup..." overwrote the
+  device outright; the picker itself never confirmed either.
+- **A backup now checks free space first** and refuses with a clear message
+  instead of failing partway through. `getSpace()` had been implemented on both
+  targets since the beginning and was never called.
+- **Failures say what happened.** Backup, delete and category-save failures
+  showed nothing at all — no dialog, no text — and the service's `errorText`
+  went only to the log.
+- **Large files no longer risk exhausting memory.** The copy path for every
+  stored and restored file ignored stream backpressure.
+- **Scanning media no longer blocks the service.** The "what to back up"
+  estimate ran a synchronous recursive walk on every app launch and every
+  window activation, stalling everything else including a running backup.
+- **The launch scrim can no longer hang the app** if a service call never
+  answers.
+- **Assorted leaks and stuck state**: status listeners accumulated on every
+  re-subscribe (now released via `cancelSubscription`); a restore that never
+  settled left every later restore rejected as "already in progress"; a
+  category toggle that failed to save reverted to the value that failed; the
+  root helper had no `uncaughtException` handler, so a throw in an async
+  callback killed it silently and everything quietly degraded to limited mode.
+
+## Testing
+
+The off-device suite could not run at all without the webOS Doctor extract:
+the fallback path in `tools/test/future.js` read the wrong field, so every
+assertion saw `undefined`. Fixed, plus regression coverage for the free-space
+refusal and the cross-device purge. 102 checks.
+
+---
+
 # woce-backup 1.0.0
 
 *2026-08-20*
