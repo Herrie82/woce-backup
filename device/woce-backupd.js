@@ -66,7 +66,7 @@ var exec = require('child_process').exec;
 // Rewritten by build.sh. Reported in the ping reply and logged by the
 // service, so "Root helper available, version X" says which daemon code is
 // actually live — upstart will not restart a running job on its own.
-var VERSION = "1.1.0+20260821-181327";
+var VERSION = "1.1.0+20260822-090554";
 
 var SERVICE_ID = "com.palm.app.backup.service";
 
@@ -638,10 +638,89 @@ ops.reboot = function (job, done) {
     }, 2000);
 };
 
+/*
+ * Every app the SYSTEM IMAGE provides, by whichever of the two routes an image
+ * can use. Neither is the user's to back up, and neither is theirs to restore:
+ * both come back by reflashing.
+ *
+ *   1. BAKED into the read-only rootfs, at the path LunaSysMgr scans.
+ *      ipkg knows nothing about these - they were flashed, not installed.
+ *   2. STAGED as a preload under /usr/palm/ipkgs, which app-install installs
+ *      into cryptofs on first boot. These end up looking exactly like a user
+ *      install, ipkg record and all, which is why the directory scan alone
+ *      cannot find them.
+ *
+ * This replaces a "com.palm.*-prefixed means system-owned" name check, which
+ * was wrong in both directions on a real device: it skipped
+ * com.palm.app.codepoet.simplechat, a community app that merely borrows the
+ * prefix, while archiving and restoring 11.7MB of QuickOffice that every image
+ * already ships. Asking the image what it provides is the actual question.
+ *
+ * Restoring one of these does not "put it back", it SHADOWS the image's own
+ * copy with an older one: a cryptofs app wins over the rootfs, so a webOS 3.0.5
+ * backup restored onto CE 3.1 would silently roll apps back to 2013.
+ *
+ * Reported separately from `packages` so it only ever informs the "does this
+ * device already have it?" question.
+ */
+var ROM_APPS_DIR = "/usr/palm/applications/";
+var PRELOAD_IPK_DIR = "/usr/palm/ipkgs/";
+
+function listImageApps() {
+    var ids = {};
+    var names;
+
+    try {
+        names = fs.readdirSync(ROM_APPS_DIR);
+        for (var i = 0; i < names.length; i++) {
+            if (existsSync(ROM_APPS_DIR + names[i] + "/appinfo.json")) {
+                ids[names[i]] = true;
+            }
+        }
+    } catch (err) {
+        // no rootfs app dir is not a failure, just nothing to add
+    }
+
+    // Staged preloads sit either flat in /usr/palm/ipkgs or in a per-app
+    // subdirectory; stock webOS 3.0.5 uses both shapes at once. The package
+    // name is the part of the .ipk filename before the first underscore.
+    var addIpks = function (dir, depth) {
+        var entries;
+        try {
+            entries = fs.readdirSync(dir);
+        } catch (err) {
+            return;
+        }
+        for (var j = 0; j < entries.length; j++) {
+            var name = entries[j];
+            var full = dir + name;
+            if (name.slice(-4) === ".ipk") {
+                ids[name.split("_")[0]] = true;
+            } else if (depth > 0) {
+                var st = statOrNull(full);
+                if (st && st.isDirectory()) {
+                    ids[name] = true;      // subdir is named for the app by convention
+                    addIpks(full + "/", depth - 1);
+                }
+            }
+        }
+    };
+    addIpks(PRELOAD_IPK_DIR, 1);
+
+    var out = [];
+    for (var id in ids) {
+        if (ids.hasOwnProperty(id)) {
+            out.push(id);
+        }
+    }
+    return out;
+}
+
 ops.listInstalledApps = function (job, done) {
+    var romApps = listImageApps();
     exec("/usr/bin/ipkg -o /media/cryptofs/apps list_installed", function (error, stdout) {
         if (error) {
-            return done({ returnValue: true, packages: [] });
+            return done({ returnValue: true, packages: [], romApps: romApps });
         }
 
         var packages = [];
@@ -661,14 +740,95 @@ ops.listInstalledApps = function (job, done) {
                 });
             }
         }
-        log("listed " + packages.length + " installed package(s)");
-        done({ returnValue: true, packages: packages });
+        log("listed " + packages.length + " installed package(s), " +
+            romApps.length + " provided by the system image");
+        done({ returnValue: true, packages: packages, romApps: romApps });
     });
 };
 
-// Where every user-installed app actually lives, regardless of whether
-// Preware/WOSQI's download cache still has the .ipk that put it there.
-var INSTALLED_APPS_DIR = "/media/cryptofs/apps/usr/palm/applications/";
+// The offset root every cryptofs install lives under, and the app directory
+// inside it - regardless of whether Preware/WOSQI's download cache still has
+// the .ipk that put it there.
+var CRYPTOFS_ROOT = "/media/cryptofs/apps/";
+var INSTALLED_APPS_DIR = CRYPTOFS_ROOT + "usr/palm/applications/";
+var IPKG_INFO_DIR = CRYPTOFS_ROOT + "usr/lib/ipkg/info/";
+
+/*
+ * The subtrees a package may own inside the cryptofs root. An app bundle is
+ * only part of what an .ipk installs: a service goes to usr/palm/services,
+ * packageinfo.json to usr/palm/packages, and a shared library to
+ * usr/palm/frameworks. Archiving only the app directory - which is all this
+ * used to do - restores an app whose service is simply missing, so it launches
+ * and does nothing.
+ *
+ * This list is also the allowlist restoreAppDirectories validates a tarball's
+ * members against, so widening it widens what a restore can write.
+ * usr/lib/ipkg is deliberately absent: that is ipkg's own bookkeeping, not the
+ * package's runtime, and rewriting it from a backup would desync the package
+ * database rather than repair it.
+ */
+var OWNED_SUBTREES = [
+    "usr/palm/applications/",
+    "usr/palm/services/",
+    "usr/palm/packages/",
+    "usr/palm/frameworks/"
+];
+
+function ownedSubtreeOf(rel) {
+    for (var i = 0; i < OWNED_SUBTREES.length; i++) {
+        if (rel.indexOf(OWNED_SUBTREES[i]) === 0) {
+            return OWNED_SUBTREES[i];
+        }
+    }
+    return null;
+}
+
+/*
+ * What ipkg says a package installed, reduced to the directories it owns.
+ *
+ * The .list file names every individual file, which for a big app is a
+ * thousand-odd paths - far past what one command line can carry. Collapsing
+ * each to its usr/palm/<kind>/<name> directory gives the same coverage in a
+ * handful of arguments, and picks up anything the package created at runtime
+ * inside its own directory as a bonus.
+ *
+ * Returns [] when there is no .list (an app that was itself restored by the
+ * directory fallback has none), and the caller falls back to the app dir.
+ */
+function ownedPathsFor(id) {
+    var listFile = IPKG_INFO_DIR + id + ".list";
+    var text;
+    try {
+        text = fs.readFileSync(listFile, "utf8");
+    } catch (err) {
+        return [];
+    }
+
+    var seen = {};
+    var out = [];
+    var lines = text.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+        var rel = lines[i].replace(/^\s+|\s+$/g, "").replace(/^\/+/, "");
+        if (!rel || rel.indexOf("..") !== -1) {
+            continue;
+        }
+        var subtree = ownedSubtreeOf(rel);
+        if (!subtree) {
+            continue;              // ipkg bookkeeping, or outside the cryptofs tree
+        }
+        var rest = rel.slice(subtree.length);
+        var name = rest.split("/")[0];
+        if (!name) {
+            continue;
+        }
+        var owned = subtree + name;
+        if (!seen[owned] && existsSync(CRYPTOFS_ROOT + owned)) {
+            seen[owned] = true;
+            out.push(owned);
+        }
+    }
+    return out;
+}
 
 /**
  * Copies the .ipk for each named package into destDir, so a restore can
@@ -735,21 +895,31 @@ ops.archivePackages = function (job, done) {
             }
         }
 
-        var appDir = INSTALLED_APPS_DIR + id;
-        var appStat = statOrNull(appDir);
-        if (!appStat || !appStat.isDirectory()) {
-            return archiveNext(i + 1);   // not installed here either - nothing to archive
+        // Everything ipkg says this package owns - app bundle, service,
+        // packageinfo, framework - relative to the cryptofs root, so a restore
+        // can put the whole thing back and not just the launchable half.
+        var owned = ownedPathsFor(id);
+        if (owned.length === 0) {
+            // No .list: an app that was itself put back by this fallback has
+            // none. The app directory alone is still better than nothing.
+            var appStat = statOrNull(INSTALLED_APPS_DIR + id);
+            if (!appStat || !appStat.isDirectory()) {
+                return archiveNext(i + 1);   // not installed here either
+            }
+            owned = ["usr/palm/applications/" + id];
         }
 
+        var quote = function (text) { return "'" + text.replace(/'/g, "'\\''") + "'"; };
         var tarball = path.join(destDir, id + "-app.tar.gz");
-        var quotedId = "'" + id.replace(/'/g, "'\\''") + "'";
-        var quotedTarball = "'" + tarball.replace(/'/g, "'\\''") + "'";
-        exec("/bin/tar czf " + quotedTarball + " -C " + INSTALLED_APPS_DIR + " " + quotedId,
-            { timeout: 60000 },
+        var args = owned.map(quote).join(" ");
+        exec("/bin/tar czf " + quote(tarball) + " -C " + CRYPTOFS_ROOT + " " + args,
+            { timeout: 120000 },
             function (error) {
                 if (error) {
                     log("directory archive failed for " + id + ": " + error.message);
                 } else {
+                    log("archived " + id + " as " + owned.length + " owned path(s): " +
+                        owned.join(", "));
                     archivedDirs.push(id);
                 }
                 archiveNext(i + 1);
@@ -760,17 +930,30 @@ ops.archivePackages = function (job, done) {
 };
 
 /**
- * Restores one app's raw installed directory from a tarball this daemon
- * fetched during this same restore - same WORK_ROOT bound as installPackages,
- * for the same reason (see the SECURITY note at the top of this file). The
- * destination is never job-supplied: it is always derived from the
- * already-validated id, so this can only ever write into that one app's own
- * directory under INSTALLED_APPS_DIR.
+ * Restores one package's raw installed files from a tarball this daemon fetched
+ * during this same restore - same WORK_ROOT bound as installPackages, for the
+ * same reason (see the SECURITY note at the top of this file).
+ *
+ * The destination is still never job-supplied: it is always CRYPTOFS_ROOT, and
+ * every member of the tarball is read out and checked BEFORE anything is
+ * extracted or deleted. A member must sit inside one of OWNED_SUBTREES and
+ * carry no "..", so the worst a tampered archive can reach is another cryptofs
+ * app's directory - not /etc, not /usr, not an ls2 role. One bad member fails
+ * the whole entry rather than extracting the rest, because a half-applied
+ * package is harder to reason about than one that plainly did not restore.
+ *
+ * Two tarball layouts exist. Archives written before this daemon captured
+ * whole packages contain "<id>/..." and restore into INSTALLED_APPS_DIR; the
+ * current ones are relative to the cryptofs root and contain the app bundle
+ * plus whatever else ipkg said the package owned - its service above all,
+ * without which an app comes back launchable and inert.
  */
 ops.restoreAppDirectories = function (job, done) {
     var files = job.files || [];
     var restored = [];
     var failed = [];
+
+    var quote = function (text) { return "'" + text.replace(/'/g, "'\\''") + "'"; };
 
     var restoreNext = function (i) {
         if (i >= files.length) {
@@ -781,35 +964,86 @@ ops.restoreAppDirectories = function (job, done) {
         var tarPath = entry.path;
         var id = entry.id;
 
+        var fail = function (why) {
+            log("directory restore failed for " + (id || "(unknown)") + ": " + why);
+            failed.push(id || "(unknown)");
+            restoreNext(i + 1);
+        };
+
         if (!id || id.indexOf("/") !== -1 || !tarPath || tarPath.indexOf(WORK_ROOT) !== 0 ||
                 tarPath.slice(-7) !== ".tar.gz" || !existsSync(tarPath)) {
-            failed.push(id || "(unknown)");
-            return restoreNext(i + 1);
+            return fail("bad entry");
         }
 
-        var destDir = INSTALLED_APPS_DIR + id;
-        var quotedDest = "'" + destDir.replace(/'/g, "'\\''") + "'";
-        var quotedTarball = "'" + tarPath.replace(/'/g, "'\\''") + "'";
+        exec("/bin/tar tzf " + quote(tarPath), { timeout: 60000 },
+            function (listError, listOut) {
+                if (listError) {
+                    return fail("could not read the archive: " + listError.message);
+                }
 
-        exec("rm -rf " + quotedDest, { timeout: 30000 }, function (rmError) {
-            if (rmError) {
-                log("could not clear " + destDir + " before restoring: " + rmError.message);
-                failed.push(id);
-                return restoreNext(i + 1);
-            }
-            exec("/bin/tar xzf " + quotedTarball + " -C " + INSTALLED_APPS_DIR,
-                { timeout: 60000 },
-                function (error) {
-                    if (error) {
-                        log("directory restore failed for " + id + ": " + error.message);
-                        failed.push(id);
-                    } else {
-                        log("restored app directory for " + id);
-                        restored.push(id);
+                var members = String(listOut || "").split("\n");
+                var legacy = true;
+                var roots = {};
+                var count = 0;
+
+                for (var m = 0; m < members.length; m++) {
+                    var name = members[m].replace(/^\s+|\s+$/g, "").replace(/^\.\//, "");
+                    if (!name) {
+                        continue;
                     }
-                    restoreNext(i + 1);
-                });
-        });
+                    count++;
+                    if (name.indexOf("..") !== -1 || name.charAt(0) === "/") {
+                        return fail("archive member escapes the destination: " + name);
+                    }
+                    if (name.indexOf(id + "/") === 0 || name === id) {
+                        continue;                       // legacy "<id>/..." member
+                    }
+                    legacy = false;
+                    var subtree = ownedSubtreeOf(name);
+                    if (!subtree) {
+                        return fail("archive member outside the allowed subtrees: " + name);
+                    }
+                    var owned = subtree + name.slice(subtree.length).split("/")[0];
+                    roots[owned] = true;
+                }
+
+                if (count === 0) {
+                    return fail("archive is empty");
+                }
+
+                var base, clear;
+                if (legacy) {
+                    base = INSTALLED_APPS_DIR;
+                    clear = [INSTALLED_APPS_DIR + id];
+                } else {
+                    base = CRYPTOFS_ROOT;
+                    clear = [];
+                    for (var r in roots) {
+                        if (roots.hasOwnProperty(r)) {
+                            clear.push(CRYPTOFS_ROOT + r);
+                        }
+                    }
+                }
+
+                exec("rm -rf " + clear.map(quote).join(" "), { timeout: 30000 },
+                    function (rmError) {
+                        if (rmError) {
+                            return fail("could not clear " + clear.join(", ") + ": " +
+                                        rmError.message);
+                        }
+                        exec("/bin/tar xzf " + quote(tarPath) + " -C " + base,
+                            { timeout: 120000 },
+                            function (error) {
+                                if (error) {
+                                    return fail(error.message);
+                                }
+                                log("restored " + id + " into " + clear.length +
+                                    " path(s): " + clear.join(", "));
+                                restored.push(id);
+                                restoreNext(i + 1);
+                            });
+                    });
+            });
     };
 
     restoreNext(0);

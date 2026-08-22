@@ -98,8 +98,13 @@ if [ -z "$IPK" ]; then
 fi
 echo "  $IPK"
 
-echo "Injecting postinst/prerm..."
-"$PYTHON" tools/repack_ipk.py "$IPK" device/postinst device/prerm
+# Also rewrites the control file from packaging/preware.json: palm-package's
+# placeholder Section/Maintainer/Description leave the package untitled and
+# filed under "Unsorted" in Preware, and the feed metadata it parses (title,
+# category, description, licence, RestartDevice flag) lives in the one-line
+# Source JSON blob that only this step adds.
+echo "Injecting postinst/prerm and feed metadata..."
+"$PYTHON" tools/repack_ipk.py "$IPK" device/postinst device/prerm packaging/preware.json
 
 echo
 echo "Built: $IPK"

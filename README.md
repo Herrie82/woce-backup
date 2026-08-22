@@ -50,11 +50,21 @@ Everything the stock backup did, because it asks the same services:
   something to notice if both come up empty: not installed by ipkg at all
   (some app-catalog-installed apps use a different layout), or gone from disk
   entirely. `com.palm.*`-owned apps are left out of all of this: they come
-  back through the OS/OTA process, not this app's restore. Anything already
+  back through the OS/OTA process, not this app's restore. So is anything
+  living in `/usr/palm/applications` — that is the system image, flashed rather
+  than installed, and not the user's to back up. `ipkg` alone will not tell you
+  which those are: its status file is the cryptofs one, but an image is free to
+  seed a stanza there for an app it *baked* into the rootfs, which webOS CE 3.1
+  does for Preware, Govnah and the Synergy runtime so Preware shows them as
+  installed. Anything already
   present on the device you're restoring onto — never uninstalled, or put back
   manually before running restore — is skipped too, checked against that
   device at restore time, not against what was installed when the backup was
-  made.
+  made — and that check covers the system image too, which matters on the
+  upgrade path this app exists to serve: an app that genuinely *was* a cryptofs
+  install on webOS 3.0.5 can be baked into the rootfs on CE 3.1, and putting the
+  backed-up copy back would not restore it, it would **shadow** the newer system
+  copy with a 2013 one.
 
 A backup checks that there is room before it starts, and refuses with a clear
 message rather than failing somewhere in the middle. Plus, optionally, user
@@ -140,6 +150,33 @@ install" below for why.
 
 `palm-install` works too, but skips the helper. The app then runs in **limited
 mode** and says so on its main screen — see below.
+
+## Packaging for a feed
+
+`build.sh` also rewrites the control file from `packaging/preware.json`. That is
+not cosmetic. `palm-package` emits `Section: misc`, `Maintainer: N/A
+<nobody@example.com>` and `Description: This is a webOS application.` — and
+Preware reads the Description as the package **title**, files `misc` under
+*Unsorted*, and special-cases that email address to hide it. Left alone, the
+package shows up in the feed untitled and uncategorised.
+
+Everything else Preware displays comes from a single-line JSON blob in the
+`Source:` field, the convention the WebOS Internals feed uses and which Preware
+parses in `app/models/package.js`. `packaging/preware.json` is the editable
+source for it and lists which keys Preware actually reads.
+
+Two of them earn their place:
+
+- `PostInstallFlags: ["RestartDevice"]` — Preware prompts for the restart the
+  first install needs (below), instead of leaving it to a README nobody reads.
+- `MinWebOSVersion: 3.0.0`, and deliberately **no** `MaxWebOSVersion` — Preware
+  treats a package capped at 3.0.5 as incompatible with a webOS CE 3.1 device,
+  so capping it would hide future updates from exactly the users this is meant
+  to carry forward.
+
+`Version` cannot be set there: it comes from
+`com.palm.app.backup/appinfo.json` by way of `palm-package`, which stays the
+single source of truth.
 
 ## Limited mode, and why the helper exists
 
@@ -253,6 +290,7 @@ com.palm.app.backup/            Enyo 0.10 app (the UI)
 com.palm.app.backup.service/    Node service (the engine)
 com.palm.app.backup.package/    packageinfo.json tying them together
 device/                     root helper, upstart job, postinst/prerm
+packaging/                  feed metadata for the control file
 tools/                      build and test tooling
 ```
 

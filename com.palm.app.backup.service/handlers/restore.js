@@ -562,14 +562,12 @@ function RestoreAssistant() {
             var result = f.result;
             progress(85);
 
-            // com.palm.*-prefixed packages are Palm/system-owned by
-            // convention on this platform (the same rule that decides
-            // private-bus outbound access, per CLAUDE.md) - even when
-            // third-party-distributed, like the community App Catalog build,
-            // they come back via the OS/OTA process, not this app's restore.
-            restorableCandidates = (manifest.packages || []).filter(function (pkg) {
-                return pkg.id.indexOf("com.palm.") !== 0;
-            });
+            // Everything in the manifest is a candidate at this point. What
+            // the *restoring* device already provides is subtracted below,
+            // once the helper has been asked - which is the only place that
+            // question can be answered, since it is about this device and not
+            // the one the backup came from.
+            restorableCandidates = (manifest.packages || []);
 
             if (restorableCandidates.length === 0 || !isPrivileged) {
                 f.result = { packages: [] };
@@ -582,13 +580,29 @@ function RestoreAssistant() {
             // The helper's own budget for this job is 60s (ipkg enumeration is
             // genuinely slow here); plain tolerate() would have capped it at
             // 20s, the same trap already fixed on the backup side.
-            f.nest(withTimeout(privileged.listInstalledApps(), 60000, { packages: [] }));
+            f.nest(withTimeout(privileged.listInstalledApps(), 60000,
+                               { packages: [], romApps: [] }));
         });
         future.then(this, function (f) {
             var result = f.result;
             var alreadyInstalled = {};
             (result.packages || []).forEach(function (pkg) {
                 alreadyInstalled[pkg.id] = true;
+            });
+            // Anything the system image provides - baked into the rootfs, or
+            // staged as a preload it installs on first boot - is already here
+            // even when ipkg has no record of it, and comes back by reflashing
+            // rather than from a backup. Putting a backed-up copy into cryptofs
+            // on top of one does not restore it, it SHADOWS the image's own
+            // copy with an older one.
+            //
+            // This is the whole webOS 3.0.5 -> CE 3.1 upgrade path: CE bakes
+            // and preloads apps a 3.0.5 device carried as ordinary cryptofs
+            // installs, so a backup taken before the upgrade names them all.
+            // It replaces a com.palm.* name check that got this wrong both
+            // ways - see listImageApps in device/woce-backupd.js.
+            (result.romApps || []).forEach(function (id) {
+                alreadyInstalled[id] = true;
             });
             restorableCandidates = restorableCandidates.filter(function (pkg) {
                 return !alreadyInstalled[pkg.id];

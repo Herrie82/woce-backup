@@ -1,0 +1,65 @@
+{
+  "_comment": [
+    "Feed metadata for Preware. Everything here ends up in the .ipk's control",
+    "file: the top-level keys become control fields, and `Source` is written",
+    "as ONE line of JSON, which is the shape Preware's package model parses",
+    "(app/models/package.js, infoLoad: `if (info.Source && info.Source.include('{'))`).",
+    "",
+    "palm-package writes a control with Section: misc, Maintainer: N/A",
+    "<nobody@example.com> and Description: 'This is a webOS application.' —",
+    "Preware special-cases that nobody@example.com address to hide it, shows the",
+    "Description as the package TITLE, and files anything in 'misc' under",
+    "'Unsorted'. So the defaults are not merely ugly, they are wrong.",
+    "",
+    "Version, Package, Architecture and Installed-Size are NOT set here: they",
+    "come from palm-package and appinfo.json, which stay the single source of",
+    "truth for the version.",
+    "",
+    "Fields Preware reads out of Source, for reference: Type, Category, Title,",
+    "Icon, LastUpdated, Homepage, Filename, Location, License, FullDescription,",
+    "Changelog, PreInstallMessage, PreUpdateMessage, PreRemoveMessage,",
+    "Screenshots, Price, MinWebOSVersion, MaxWebOSVersion, DeviceCompatibility,",
+    "Feed, Countries, Languages, PostInstallFlags, PostUpdateFlags,",
+    "PostRemoveFlags. LastUpdated is stamped at build time and must not be set."
+  ],
+
+  "Section": "System Utilities",
+  "Priority": "optional",
+  "Maintainer": "webOS Community Edition <https://webosarchive.org>",
+  "Description": "Backup and Restore",
+  "Depends": "",
+
+  "Source": {
+    "Type": "Application",
+    "Category": "System Utilities",
+    "Title": "Backup and Restore",
+    "Feed": "webOS Archive",
+    "Homepage": "https://webosarchive.org",
+    "License": "GPL v2 Open Source",
+
+    "_MinWebOSVersion": [
+      "The TouchPad never shipped anything older than 3.0.0, and this replaces",
+      "an app that only exists on webOS 3. No MaxWebOSVersion: Preware treats a",
+      "package capped at 3.0.5 as incompatible with a CE 3.1 device (see",
+      "packageModel.versionIncompatible), and capping it would hide future",
+      "updates from exactly the people this is meant to carry forward."
+    ],
+    "MinWebOSVersion": "3.0.0",
+
+    "_PostInstallFlags": [
+      "ls-hubd and mojodb-luna each read their configuration once, at their own",
+      "startup. The postinst writes an ls2 role and a db8 admin grant, so",
+      "neither takes effect until the device restarts — which is why the very",
+      "first install needs one. Preware prompts for the restart when it sees",
+      "this flag, so the user is not left to read a README to find that out.",
+      "(An upgrade over an existing install does not need it, but Preware has",
+      "no separate 'first install only' flag and a redundant restart is far",
+      "cheaper than a silently half-working backup.)"
+    ],
+    "PostInstallFlags": ["RestartDevice"],
+
+    "FullDescription": "A working Backup and Restore for webOS, storing backups <b>on the device</b> instead of on Palm's servers.<br><br>The Backup app that ships on every webOS device still launches, but it cannot work: it was a thin UI over a service that uploaded everything to Palm's cloud, and those servers went dark in 2013. Nothing underneath is broken — every service that participates in backup still answers — so this replaces only the destination.<br><br><b>What it backs up:</b> accounts, contacts and calendar; system settings and preferences; browser data and stored credentials; application data; anything a third-party app registers for itself; and the applications themselves, reinstalled automatically on restore. Optionally your media from /media/internal, as individually selectable categories (off by default, since a local backup lives on the same volume).<br><br>Backups go to /media/internal/webos-backups as plain files you can copy off the device over USB. They are content-addressed, so an unchanged file is stored once no matter how many backups reference it.<br><br><b>Backups are not encrypted.</b> This is a deliberate departure from stock. The original encrypted every file with a device key that does not survive a webOS Doctor and does not exist on another device — making the backup unreadable in precisely the two situations you would reach for it. Anyone with access to the device's USB storage can read a backup, so move it somewhere safe if that matters to you.<br><br><b>Install with Preware, not palm-install</b>, and restart the device once afterwards — only Preware runs the postinst as root, and that is what installs the privileged helper the full backup needs. Without it the app runs in a limited mode and says so.",
+
+    "Changelog": "1.1.0: First public release. Local backup and restore, incremental content-addressed storage, application archive and reinstall, selectable media categories, and restore from any backup on the device."
+  }
+}

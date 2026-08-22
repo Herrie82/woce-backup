@@ -893,7 +893,7 @@ async function main() {
         "privileged.listInstalledApps = function () {" +
         "  return new Future({ returnValue: true, packages: [" +
         "    { id: 'com.example.appthree', version: '3.0', title: 'App Three' }" +
-        "  ] });" +
+        "  ], romApps: ['com.palm.somesystemapp'] });" +
         "};", pkgCtx);
 
     var pkgRestore = await run(pkgCtx, "RestoreAssistant",
@@ -924,7 +924,7 @@ async function main() {
         resultAppFour && resultAppFour.installed === true, JSON.stringify(resultAppFour));
     check("a package already installed on this device is left out of the result entirely",
         !resultAppThree, JSON.stringify(resultAppThree));
-    check("a com.palm.*-prefixed package is left out of the result entirely",
+    check("a package the system image provides is left out of the result entirely",
         !resultSystemApp, JSON.stringify(resultSystemApp));
     check("neither excluded package was ever handed to installPackages",
         pkgCtx.__installCalls[0].every(function (f) {
@@ -936,6 +936,55 @@ async function main() {
             return f.id !== "com.example.appthree" && f.id !== "com.palm.somesystemapp";
         }),
         JSON.stringify(pkgCtx.__restoreDirCalls));
+
+    // An app that lives in /usr/palm/applications belongs to the system image.
+    // ipkg can still report it as installed - webOS CE seeds cryptofs status
+    // stanzas for apps it BAKES, so Preware shows them - so the id turning up
+    // in `packages` is not enough to call it the user's. Backup must leave it
+    // out of the manifest entirely.
+    vm.runInContext(
+        "privileged.listInstalledApps = function () {" +
+        "  return new Future({ returnValue: true, packages: [" +
+        "    { id: 'com.example.appone', version: '1.0', title: 'App One' }," +
+        "    { id: 'org.example.bakedapp', version: '0.9', title: 'Baked App' }" +
+        "  ], romApps: ['org.example.bakedapp'] });" +
+        "};", pkgCtx);
+    var romBackup = await run(pkgCtx, "BackupAssistant", { full: true }, []);
+    check("a backup with a system app in the ipkg list still completes",
+        !romBackup.error && romBackup.result && romBackup.result.STATUS === "Complete",
+        romBackup.error ? romBackup.error.message : JSON.stringify(romBackup.result));
+    var romManifest = JSON.parse(fs.readFileSync(
+        path.join(manifestDir(), romBackup.result.manifestName), "utf8"));
+    var romIds = (romManifest.packages || []).map(function (p) { return p.id; });
+    check("an app in /usr is left out of the backup manifest",
+        romIds.indexOf("org.example.bakedapp") === -1, JSON.stringify(romIds));
+    check("the user's own app is still recorded",
+        romIds.indexOf("com.example.appone") !== -1, JSON.stringify(romIds));
+
+    // And the restore side of the same rule, which the backup filter cannot
+    // cover: a backup taken on webOS 3.0.5, where the app really was a cryptofs
+    // install, restored onto CE 3.1, which bakes that app into the rootfs.
+    // Putting the backed-up copy back would shadow the newer system one.
+    pkgCtx.__installCalls = [];
+    pkgCtx.__restoreDirCalls = [];
+    vm.runInContext(
+        "privileged.listInstalledApps = function () {" +
+        "  return new Future({ returnValue: true, packages: []," +
+        "    romApps: ['com.example.appone', 'com.example.appfour'] });" +
+        "};", pkgCtx);
+    var romRestore = await run(pkgCtx, "RestoreAssistant",
+        { manifestName: pkgBackup.result.manifestName }, []);
+    check("restore completes with every restorable app now baked into the image",
+        !romRestore.error && romRestore.result && romRestore.result.STATUS === "Complete",
+        romRestore.error ? romRestore.error.message : JSON.stringify(romRestore.result));
+    check("an app baked into the system image is never reinstalled over",
+        pkgCtx.__installCalls.every(function (call) {
+            return call.every(function (f) { return f.id !== "com.example.appone"; });
+        }), JSON.stringify(pkgCtx.__installCalls));
+    check("nor is one put back as a raw app directory",
+        pkgCtx.__restoreDirCalls.every(function (call) {
+            return call.every(function (f) { return f.id !== "com.example.appfour"; });
+        }), JSON.stringify(pkgCtx.__restoreDirCalls));
 
     // Confirmed on-device: a second restore call fired while one was already
     // running - well past the point any client-side re-entry guard could

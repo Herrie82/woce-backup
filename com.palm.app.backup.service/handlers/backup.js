@@ -770,14 +770,32 @@ function BackupAssistant() {
                 // gives the helper's own job a 60s budget for it - the blanket
                 // 20s cap was silently cutting that off before it could ever be
                 // used, every single run.
-                f.nest(withTimeout(privileged.listInstalledApps(), 60000, { packages: [] }));
+                f.nest(withTimeout(privileged.listInstalledApps(), 60000,
+                                   { packages: [], romApps: [] }));
             } else {
-                f.result = { packages: [] };
+                f.result = { packages: [], romApps: [] };
             }
         });
         future.then(this, function (f) {
             var result = f.result;
-            manifest.packages = (result && result.packages) || [];
+            // Only the user's own apps. Anything the system image provides -
+            // baked into /usr/palm/applications, or staged under
+            // /usr/palm/ipkgs as a preload it installs on first boot - comes
+            // back by reflashing, so it has no business in a user backup.
+            //
+            // ipkg cannot tell us that on its own. A preload leaves an ordinary
+            // cryptofs install behind, indistinguishable from a user's; and an
+            // image is free to seed a status stanza for an app it BAKED, which
+            // webOS CE 3.1 does for Preware, Govnah and the Synergy runtime so
+            // Preware shows them installed. Taking that list at face value both
+            // archived 13MB of preloaded apps the restoring device already has
+            // and tried to tar directories that are not in cryptofs at all.
+            var romApps = {};
+            ((result && result.romApps) || []).forEach(function (id) {
+                romApps[id] = true;
+            });
+            manifest.packages = (((result && result.packages) || [])
+                .filter(function (pkg) { return !romApps[pkg.id]; }));
             backup.incrementProgress(5);
 
             if (manifest.packages.length === 0 || !isPrivileged) {

@@ -11,7 +11,7 @@
 // log says which code is actually running — a reinstall does not restart a
 // live node service, so it is easy to spend an evening debugging the
 // previous build.
-var SERVICE_BUILD = "1.1.0+20260821-181327";
+var SERVICE_BUILD = "1.1.0+20260822-090554";
 
 function ServiceAssistant() {
 }
