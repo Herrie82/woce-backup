@@ -8,6 +8,67 @@
 
 APP_DIR="/media/cryptofs/apps/usr/palm/applications/com.palm.app.backup"
 NODE="/usr/palm/nodejs/node"
+ROM_APP="/usr/palm/applications/com.palm.app.backup"
+ROM_BACKUP="/var/luna/com.palm.app.backup.woce-orig"
+EXPECT_OSVER="3.0.5"
+
+# --- supplant the built-in Backup app ----------------------------------------
+#
+# Installing to /media/cryptofs does NOT override a ROM app of the same id.
+# Measured on stock 3.0.5, with this app declaring a HIGHER version than the
+# built-in (3.1.0 vs 2.0.0) and after a reboot: the launcher entry, getAppInfo
+# and the running card all still resolved to
+# /usr/palm/applications/com.palm.app.backup. The app installed perfectly and
+# then sat there while the tile went on launching the dead built-in - which
+# talks to com.palm.service.backup and cannot write a thing. Version does not
+# decide it; the ROM copy simply wins.
+#
+# So the ROM copy is moved aside, the same way the TLS packages swap a stock
+# binary: back it up ONCE, keep the restore point, put it back in prerm.
+#
+# Guards, in order of how badly each would end:
+#   * Only ever move a copy that is NOT ours. On webOS CE the ROM copy IS this
+#     app (baked into the image), and moving it would delete the working one.
+#     Checked by content, not by version, so it holds for every build.
+#   * Only on the webOS version this targets. A different build's Backup app is
+#     not ours to reason about.
+#   * Never overwrite an existing restore point: the first one is the stock one.
+is_ours() { grep -q "webOS Community Edition" "$1/appinfo.json" 2>/dev/null; }
+
+osv=$(sed -n 's/^PRODUCT_VERSION_STRING=.* \([0-9][0-9.]*\)$/\1/p' /etc/palm-build-info 2>/dev/null | head -1)
+
+if [ ! -d "$ROM_APP" ]; then
+    echo "  no built-in Backup app to supplant"
+elif is_ours "$ROM_APP"; then
+    echo "  the built-in Backup app is already this app (baked image) - leaving it alone"
+elif [ -n "$osv" ] && [ "$osv" != "$EXPECT_OSVER" ]; then
+    echo "  WARNING: this device reports webOS $osv, not $EXPECT_OSVER."
+    echo "  NOT moving its built-in Backup app aside - the launcher will keep"
+    echo "  launching the built-in one instead of this app."
+else
+    WASRO=0
+    awk '$2=="/" && $1!="rootfs"' /proc/mounts 2>/dev/null | grep -q "[ ,]ro[ ,]" && WASRO=1
+    mount -o remount,rw / 2>/dev/null || true
+
+    if [ -d "$ROM_BACKUP" ] && is_ours "$ROM_BACKUP"; then
+        echo "  discarding a restore point that is one of our own builds, not the stock app"
+        rm -rf "$ROM_BACKUP"
+    fi
+    if [ ! -d "$ROM_BACKUP" ]; then
+        mkdir -p /var/luna 2>/dev/null
+        cp -a "$ROM_APP" "$ROM_BACKUP" 2>/dev/null
+    fi
+    if [ -d "$ROM_BACKUP" ]; then
+        rm -rf "$ROM_APP"
+        echo "  moved the built-in Backup app aside (restore point: $ROM_BACKUP)"
+    else
+        echo "  WARNING: could not back up $ROM_APP - leaving it in place."
+        echo "  The launcher will keep launching the built-in Backup app."
+    fi
+
+    [ "$WASRO" = 1 ] && mount -o remount,ro / 2>/dev/null
+    true
+fi
 
 echo "woce-backup: installing the privileged helper..."
 

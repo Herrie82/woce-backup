@@ -24,6 +24,10 @@ var LOCAL_TARGET_ROOT = "/media/internal/webos-backups/";
 // Layout inside a target. Same names the stock service used on the storage
 // server, so a manifest is byte-comparable with a legacy one.
 var MANIFESTS_PATH = "manifests/";
+// Restore receipts. A sibling of manifests/, never inside it:
+// listLocalManifests enumerates that directory, and a non-manifest
+// living there is a trap even though the name regex would reject it.
+var RECEIPTS_PATH  = "receipts/";
 var FILES_PATH     = "files/";
 
 // Where services declare their backup callbacks. This is the stock directory,
@@ -260,9 +264,11 @@ function serviceCallTimeout(serviceName) {
  * How long to allow a helper operation that works through a list of packages.
  *
  * The helper handles these strictly one at a time and gives each item its own
- * 60s command timeout (tar for an app directory, ipkg for an .ipk), so any
- * fixed budget on this side is really a cap on how many packages may be
- * processed before the caller stops listening. Both the archive side and the
+ * command timeout - for an app directory that is now SIZED to the tree (see
+ * archivePackages in device/woce-backupd.js: ~1.5s per MB, floor 120s, ceiling
+ * 20min, because a real backup archives at well under 1MB/s while competing
+ * with itself for the disk). So any fixed budget on this side is really a cap
+ * on how many packages may be processed before the caller stops listening. Both the archive side and the
  * reinstall side had one: 60s flat for archiving, and — worse — plain
  * tolerate()'s generic 20s for reinstalling, which on any real restore expired
  * long before ipkg had finished, reported every application as needing a manual
@@ -275,7 +281,20 @@ function serviceCallTimeout(serviceName) {
  */
 var PACKAGE_OP_TIMEOUT_EACH = 90000;      // fetch + tar/ipkg for one package
 var PACKAGE_OP_TIMEOUT_MIN  = 120000;
-var PACKAGE_OP_TIMEOUT_MAX  = 1800000;    // 30 minutes
+// 60 minutes. Was 30, which is less than the archive phase alone takes on a
+// device with a real app library: the last measured run spent ~25min archiving
+// 106 packages with every large one FAILING at the old flat 120s. Now that
+// those actually run to completion the total is necessarily larger, and the
+// ceiling has to leave room for them or it just relocates the truncation.
+//
+// Do NOT raise this. doRestore spends it TWICE - once on installArchivedPackages
+// and again on installArchivedAppDirectories - so 60 minutes each is already the
+// whole 7200s commandTimeout the bus allows startBackup/restore (see
+// RESTORE_STUCK_MS). Past that the caller has given up and there is no receipt at
+// all, which is strictly worse than a truncated one. The per-package tar budgets
+// in woce-backupd size themselves and are the right place to give a large app
+// more room.
+var PACKAGE_OP_TIMEOUT_MAX  = 3600000;
 
 function packageOpBudget(count) {
     var budget = (count || 0) * PACKAGE_OP_TIMEOUT_EACH;

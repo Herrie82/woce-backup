@@ -26,6 +26,26 @@ fi
 rm -f /etc/event.d/woce-backupd
 rm -f /var/log/woce-backupd.log
 
+# Put the built-in Backup app back where postinst found it. Without this an
+# uninstall leaves the device with no Backup app at all: ours goes with the
+# package, and the ROM copy was moved aside to stop it winning the launcher.
+ROM_APP="/usr/palm/applications/com.palm.app.backup"
+ROM_BACKUP="/var/luna/com.palm.app.backup.woce-orig"
+if [ -d "$ROM_BACKUP" ]; then
+    WASRO=0
+    awk '$2=="/" && $1!="rootfs"' /proc/mounts 2>/dev/null | grep -q "[ ,]ro[ ,]" && WASRO=1
+    mount -o remount,rw / 2>/dev/null || true
+    rm -rf "$ROM_APP"
+    if cp -a "$ROM_BACKUP" "$ROM_APP" 2>/dev/null; then
+        rm -rf "$ROM_BACKUP"
+        echo "  restored the built-in Backup app"
+    else
+        echo "  WARNING: could not restore $ROM_APP from $ROM_BACKUP - it is still there."
+    fi
+    [ "$WASRO" = 1 ] && mount -o remount,ro / 2>/dev/null
+    true
+fi
+
 # Working area only - job files and staging scratch, never the backups.
 rm -rf /media/internal/.woce-backup/jobs
 rm -rf /media/internal/.woce-backup/stage

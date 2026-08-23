@@ -415,7 +415,13 @@ enyo.kind({
             this.$.BackupProgressButton.showButton();
             this.$.BackupProgressButton.showSpinner();
             this.$.BackupProgressButton.setPosition(inResponse.percent);
-            this.$.BackupProgressButton.setLabelValue(label_progress_backing_now);
+            // The service names what it is working on when it can. Archiving a
+            // large app can hold the percentage still for minutes, and a bar
+            // that does not move with no explanation reads as a hang.
+            this.$.BackupProgressButton.setLabelValue(
+                inResponse.detail
+                    ? label_progress_backing_app.replace("{$name}", inResponse.detail)
+                    : label_progress_backing_now);
             break;
 
         case "Complete":

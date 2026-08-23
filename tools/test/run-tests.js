@@ -819,6 +819,7 @@ async function main() {
         "    { id: 'com.example.apptwo', version: '2.0', title: 'App Two' }," +
         "    { id: 'com.example.appthree', version: '3.0', title: 'App Three' }," +
         "    { id: 'com.example.appfour', version: '4.0', title: 'App Four' }," +
+        "    { id: 'com.example.appfive', version: '5.0', title: 'App Five' }," +
         "    { id: 'com.palm.somesystemapp', version: '1.0', title: 'Some System App' }" +
         "  ] });" +
         "};", pkgCtx);
@@ -829,22 +830,32 @@ async function main() {
     };
     // appfour models the common case: no cached .ipk, so the daemon's
     // fallback tars up the installed app directory instead.
-    pkgCtx.__writeArchivedAppDir = function (destDir) {
+    pkgCtx.__writeArchivedAppDir = function (destDir, id) {
         mkdirs(destDir);
-        fs.writeFileSync(path.join(destDir, "com.example.appfour-app.tar.gz"), "fake tarball bytes");
+        fs.writeFileSync(path.join(destDir, (id || "com.example.appfour") + "-app.tar.gz"),
+                         "fake tarball bytes");
     };
     vm.runInContext(
+        // The service now calls this once PER PACKAGE so it can name what it is
+        // working on, so the stub answers for whichever one it was handed.
         "privileged.archivePackages = function (packages, destDir) {" +
         "  __archiveDestDirs.push(destDir);" +
-        "  __writeArchivedIpk(destDir);" +
-        "  __writeArchivedAppDir(destDir);" +
-        "  return new Future({ returnValue: true," +
-        "    archived: ['com.example.appone']," +
-        "    archivedDirs: ['com.example.appfour'] });" +
+        "  var id = packages[0] && packages[0].id;" +
+        "  var out = { returnValue: true, archived: [], archivedDirs: [], failures: [] };" +
+        "  if (id === 'com.example.appone') { __writeArchivedIpk(destDir); out.archived.push(id); }" +
+        "  if (id === 'com.example.appfour') { __writeArchivedAppDir(destDir); out.archivedDirs.push(id); }" +
+        "  if (id === 'com.example.appfive') { __writeArchivedAppDir(destDir, 'com.example.appfive'); out.archivedDirs.push(id); }" +
+        "  if (id === 'com.example.apptwo') { out.failures.push({ id: id," +
+        "      reason: 'timed out after 300s (budget 300s for 412MB)' }); }" +
+        "  return new Future(out);" +
         "};", pkgCtx);
     vm.runInContext("prefs.set({ userEnabled: true, includePackages: true });", pkgCtx);
 
     var pkgBackup = await run(pkgCtx, "BackupAssistant", { full: true }, []);
+    check("archiving asks for one package at a time (so it can name each)",
+        pkgCtx.__archiveDestDirs.length >= 4,
+        "archive calls: " + pkgCtx.__archiveDestDirs.length);
+
     check("backup with archivable packages completes",
         !pkgBackup.error && pkgBackup.result && pkgBackup.result.STATUS === "Complete",
         pkgBackup.error ? pkgBackup.error.message : JSON.stringify(pkgBackup.result));
@@ -861,6 +872,16 @@ async function main() {
         JSON.stringify(appTwo));
 
     var appFour = (pkgManifest.packages || []).filter(function (p) { return p.id === "com.example.appfour"; })[0];
+    // The helper reports WHY an archive failed; that reason has to survive into
+    // the manifest, or a package that timed out looks identical to one that was
+    // never installed.
+    var appTwoEntry = (pkgManifest.packages || []).filter(function (p) {
+        return p.id === "com.example.apptwo";
+    })[0];
+    check("a failed archive records the helper's reason in the manifest",
+        appTwoEntry && /timed out after 300s/.test(appTwoEntry.archiveError || ""),
+        JSON.stringify(appTwoEntry && appTwoEntry.archiveError));
+
     check("the package with no cached .ipk falls back to a directory backup",
         appFour && appFour.archived === false && !appFour.file &&
             appFour.dirBackedUp === true && appFour.dirFile &&
@@ -886,8 +907,17 @@ async function main() {
     vm.runInContext(
         "privileged.restoreAppDirectories = function (files) {" +
         "  __restoreDirCalls.push(files);" +
+        "  var ok = [], bad = [], why = {};" +
+        "  files.forEach(function (f) {" +
+        "    if (f.id === 'com.example.appfive') {" +
+        "      bad.push(f.id);" +
+        "      why[f.id] = 'extracting timed out after 642s (budget 642s for a 214MB archive)';" +
+        "    } else { ok.push(f.id); }" +
+        "  });" +
         "  return new Future({ returnValue: true," +
-        "    restored: files.map(function (f) { return f.id; }), failed: [] });" +
+        "    restored: ok, failed: bad, failureReasons: why," +
+        // the helper reports which of them needed their service registering
+        "    servicesRegistered: ok });" +
         "};", pkgCtx);
     vm.runInContext(
         "privileged.listInstalledApps = function () {" +
@@ -905,9 +935,10 @@ async function main() {
         pkgCtx.__installCalls.length === 1 && pkgCtx.__installCalls[0].length === 1 &&
             pkgCtx.__installCalls[0][0].id === "com.example.appone",
         JSON.stringify(pkgCtx.__installCalls));
-    check("restoreAppDirectories was only asked for the directory-backed-up package",
-        pkgCtx.__restoreDirCalls.length === 1 && pkgCtx.__restoreDirCalls[0].length === 1 &&
-            pkgCtx.__restoreDirCalls[0][0].id === "com.example.appfour",
+    check("restoreAppDirectories was only asked for the directory-backed-up packages",
+        pkgCtx.__restoreDirCalls.length === 1 && pkgCtx.__restoreDirCalls[0].length === 2 &&
+            pkgCtx.__restoreDirCalls[0].map(function (f) { return f.id; }).sort().join(",") ===
+                "com.example.appfive,com.example.appfour",
         JSON.stringify(pkgCtx.__restoreDirCalls));
 
     var resultPackages = (pkgRestore.result && pkgRestore.result.packages) || [];
@@ -936,6 +967,65 @@ async function main() {
             return f.id !== "com.example.appthree" && f.id !== "com.palm.somesystemapp";
         }),
         JSON.stringify(pkgCtx.__restoreDirCalls));
+
+    // The restore receipt: the only durable record of what a restore did.
+    // Every outcome must be represented, and the two skip reasons must stay
+    // distinguishable - "you already have it" and "the image provides it" are
+    // different answers to "why is my app missing".
+    var receiptDir = path.join(ROOT, "backups", "receipts");
+    // Several restores run in this suite, each leaving its own receipt, so pick
+    // the one for THIS manifest's first restore rather than whatever sorts first.
+    var wantReceipt = pkgBackup.result.manifestName + "-restore-01.json";
+    var receipts = fs.existsSync(receiptDir) ? fs.readdirSync(receiptDir) : [];
+    check("a restore writes a receipt named for the manifest and attempt",
+        receipts.indexOf(wantReceipt) !== -1, JSON.stringify(receipts));
+    if (receipts.indexOf(wantReceipt) !== -1) {
+        var rcpt = JSON.parse(fs.readFileSync(path.join(receiptDir, wantReceipt), "utf8"));
+        var byId = {};
+        (rcpt.packages || []).forEach(function (p) { byId[p.id] = p.outcome; });
+        check("the receipt names the manifest it restored",
+            rcpt.manifestName === pkgBackup.result.manifestName, JSON.stringify(rcpt.manifestName));
+        check("an app that was put back reads as installed",
+            byId["com.example.appone"] === "installed", JSON.stringify(byId));
+        check("an app the backup never captured reads as not-captured",
+            byId["com.example.apptwo"] === "not-captured", JSON.stringify(byId));
+        var twoEntry = (rcpt.packages || []).filter(function (p) {
+            return p.id === "com.example.apptwo";
+        })[0];
+        check("the receipt says WHY it was not captured",
+            twoEntry && /timed out after 300s/.test(twoEntry.note || ""),
+            JSON.stringify(twoEntry));
+        // The bug this guards: a directory restore that ran out of time was
+        // recorded as a bare "failed", indistinguishable from a corrupt
+        // archive, and two 400MB games were misdiagnosed for a whole release
+        // cycle because of it. The helper's reason has to reach the receipt.
+        check("a directory restore that failed reads as failed",
+            byId["com.example.appfive"] === "failed", JSON.stringify(byId));
+        var fiveEntry = (rcpt.packages || []).filter(function (p) {
+            return p.id === "com.example.appfive";
+        })[0];
+        check("the receipt says WHY the directory restore failed",
+            fiveEntry && /timed out after 642s/.test(fiveEntry.note || ""),
+            JSON.stringify(fiveEntry));
+        check("a failed restore is not also claimed as a registered service",
+            fiveEntry && !fiveEntry.serviceRegistered, JSON.stringify(fiveEntry));
+        check("an app already on the device reads as already-present",
+            byId["com.example.appthree"] === "already-present", JSON.stringify(byId));
+        check("an app the image provides reads as image-provided",
+            byId["com.palm.somesystemapp"] === "image-provided", JSON.stringify(byId));
+        var svcEntry = (rcpt.packages || []).filter(function (p) {
+            return p.id === "com.example.appfour";
+        })[0];
+        check("an app whose service we registered says so in the receipt",
+            svcEntry && svcEntry.serviceRegistered === true && /reboot/.test(svcEntry.note || ""),
+            JSON.stringify(svcEntry));
+        check("the receipt counts how many services it had to register",
+            rcpt.summary.servicesRegistered >= 1, JSON.stringify(rcpt.summary));
+        check("the summary counts add up to the package list",
+            (rcpt.summary.installed + rcpt.summary.failed + rcpt.summary.notCaptured +
+             rcpt.summary.alreadyPresent + rcpt.summary.imageProvided) === rcpt.packages.length,
+            JSON.stringify(rcpt.summary));
+    }
 
     // An app that lives in /usr/palm/applications belongs to the system image.
     // ipkg can still report it as installed - webOS CE seeds cryptofs status

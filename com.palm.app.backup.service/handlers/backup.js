@@ -615,6 +615,15 @@ function BackupAssistant() {
         var tempDirFuture;
         var preferences;
         var packageFiles;   // [{path}], the .ipks archivePackages actually found
+        // id -> why its archive failed. Populated when the helper answers and
+        // read three callbacks later, so it lives out here rather than in the
+        // callback that fills it.
+        var archiveFailures = {};
+        // Accumulated across the per-package archive calls below and read in
+        // the callback after them, so they live at run scope.
+        var archivedAll = [];
+        var archivedDirsAll = [];
+        var failuresAll = [];
 
         future.nest(prefs.get());
         future.then(this, function (f) {
@@ -815,15 +824,55 @@ function BackupAssistant() {
             // defeats the entire point at restore time: the manifest records
             // apps it could have put back automatically as needing a manual
             // reinstall.
-            f.nest(withTimeout(
-                privileged.archivePackages(manifest.packages, stageDir + "packages/"),
-                packageOpWrapperBudget(manifest.packages.length),
-                { archived: [], archivedDirs: [] }));
+            // ONE PACKAGE PER CALL, so the run can say what it is working on.
+            // Archiving is where a backup goes quiet: a 439MB game takes
+            // minutes during which the percentage cannot move, and a still bar
+            // with no explanation reads as a hang. Handing the helper the whole
+            // list meant the service was blind until the last one finished.
+            //
+            // The per-call budget is a flat generous value rather than
+            // packageOpBudget(1) - that is 120s, which would re-impose at this
+            // level exactly the limit just removed from the helper. The helper
+            // sizes its own tar timeout (~1.5s/MB, ceiling 20min) and always
+            // answers before it, so this only has to be comfortably larger.
+            var SINGLE_PACKAGE_BUDGET = 1260000;   // helper ceiling + 60s
+            f.nest(mapFuture(manifest.packages, function (pkg) {
+                // Just the name. $L lives in the app, not in this service -
+                // there is no localisation here, and composing the sentence
+                // service-side would hard-code English into the protocol.
+                backup.setStatusDetail(pkg.title || pkg.id);
+                var one = withTimeout(
+                    privileged.archivePackages([pkg], stageDir + "packages/",
+                                               SINGLE_PACKAGE_BUDGET),
+                    SINGLE_PACKAGE_BUDGET + 30000,
+                    { archived: [], archivedDirs: [], failures: [] });
+                one.then(this, function (of) {
+                    var r = of.exception ? {} : (of.result || {});
+                    archivedAll = archivedAll.concat(r.archived || []);
+                    archivedDirsAll = archivedDirsAll.concat(r.archivedDirs || []);
+                    failuresAll = failuresAll.concat(r.failures || []);
+                    of.result = {};
+                });
+                return one;
+            }));
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            backup.setStatusDetail(null);
+            f.result = { archived: archivedAll, archivedDirs: archivedDirsAll,
+                         failures: failuresAll };
         });
         future.then(this, function (f) {
             var result = f.result;
             var archivedIds = (result && result.archived) || [];
             var archivedDirIds = (result && result.archivedDirs) || [];
+            // Why an archive did not happen, straight from the helper. Without
+            // it a package that timed out is indistinguishable in the manifest
+            // from one that was never installed - both just lack a file - and
+            // "not captured" at restore time gives the user nothing to act on.
+            ((result && result.failures) || []).forEach(function (fl) {
+                archiveFailures[fl.id] = fl.reason;
+            });
             var archivedSet = {};
             archivedIds.forEach(function (id) { archivedSet[id] = true; });
             var archivedDirSet = {};
@@ -864,6 +913,9 @@ function BackupAssistant() {
                 }
                 if (pkg.dirBackedUp) {
                     pkg.dirFile = cleanFileDescriptor(byPath[pkg.id + "-app.tar.gz"]);
+                }
+                if (archiveFailures[pkg.id]) {
+                    pkg.archiveError = archiveFailures[pkg.id];
                 }
             });
             backup.incrementProgress(5);

@@ -8,6 +8,8 @@
 
 label_progress_backup_now      = $L("Back Up Now");
 label_progress_backing_now     = $L("Backing up...");
+// Shown while the service names what it is on; {$name} is an app title.
+label_progress_backing_app     = $L("Backing up {$name}...");
 label_progress_backup_complete = $L("Backup complete");
 label_progress_backup_failed   = $L("Backup failed");
 label_progress_preparing       = $L("Preparing...");

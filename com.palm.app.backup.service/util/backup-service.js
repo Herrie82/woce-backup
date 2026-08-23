@@ -10,7 +10,7 @@
  * .enc and getFinalPath has no encrypted branch — see util/file-util.js for
  * why.
  */
-/*global DB, Future, FILES_PATH, MANIFESTS_PATH, MANIFEST_ROOT, fileUtil,
+/*global DB, Future, FILES_PATH, MANIFESTS_PATH, RECEIPTS_PATH, MANIFEST_ROOT, fileUtil,
   logger, mapFuture, privileged, removeAll, require, system, userData, isEmptyObject,
   STATIC_SERVICES_ROOT,
   zeroPad, dateUtil */
@@ -84,6 +84,28 @@ var backup = (function () {
                 logger.warn("Status listener threw:", err.message);
             }
         });
+    };
+
+    /**
+     * A one-line note about what the run is doing right now, e.g. the app it is
+     * archiving. Purely cosmetic: the app shows it instead of the generic
+     * "Backing up..." while it is set, and falls back when it is not.
+     *
+     * Fires immediately rather than going through incrementProgress's 0.5%
+     * throttle - the whole point is the phases where the percentage does NOT
+     * move, so throttling on percentage would suppress exactly the updates
+     * that matter.
+     */
+    that.setStatusDetail = function (text) {
+        if (!status) {
+            return;
+        }
+        if (text) {
+            status.detail = text;
+        } else {
+            delete status.detail;
+        }
+        fireStatusChanged();
     };
 
     var setStatus = function (s) {
@@ -592,6 +614,42 @@ var backup = (function () {
         future.then(this, function (f) {
             var result = f.result;
             f.result = name;
+        });
+        return future;
+    };
+
+    /**
+     * Writes a restore receipt to the target.
+     *
+     * Named for the manifest it restored plus the count, so repeated restores
+     * of one backup do not overwrite each other's record - "it worked the first
+     * time and not the second" is exactly the kind of thing you want to be able
+     * to see afterwards.
+     *
+     * Deliberately simpler than storeManifest: there is no local cache to keep
+     * in step, and nothing reads a receipt back, so it is a straight upload.
+     */
+    that.storeRestoreReceipt = function (target, receipt, manifestName) {
+        var name = manifestName + "-restore-" + zeroPad(receipt.restoreCount || 1, 2) + ".json";
+        var temp = MANIFEST_ROOT + "receipt-temp";
+        var future = fileUtil.writeJson(temp, receipt);
+
+        future.then(this, function (f) {
+            var result = f.result;
+            f.nest(target.putFile(RECEIPTS_PATH + name, temp));
+        });
+        future.then(this, function (f) {
+            var err = f.exception;
+            var cleanup = fileUtil.rmIfExists(temp);
+            cleanup.then(this, function (cf) {
+                if (cf.exception) {
+                    logger.warn("Could not remove the scratch receipt:",
+                        cf.exception.message);
+                }
+                cf.exception = err;      // undefined on success: carries nothing
+                cf.result = name;
+            });
+            f.nest(cleanup);
         });
         return future;
     };

@@ -39,9 +39,13 @@ Everything the stock backup did, because it asks the same services:
   automatically via `ipkg` — no App Catalog round trip, no tapping through
   installers one at a time. For anything installed long enough ago that its
   original `.ipk` is gone from both caches — the common case — the fallback
-  is the installed app's own directory under
-  `/media/cryptofs/apps/usr/palm/applications/`, tarred up as-is and put back
-  the same way on restore. LunaSysMgr picks it up the same way it picks up a
+  archives the package's whole installed footprint out of
+  `/media/cryptofs/apps/`, and puts it back the same way on restore. Not just
+  the app bundle: `ipkg`'s own `.list` file says which directories the package
+  owns, so its **service** under `usr/palm/services/` comes too, along with
+  `usr/palm/packages/` and any framework. Archiving only the app directory —
+  which is what this used to do — restores an app that launches and then does
+  nothing, because the service half of it was never captured. LunaSysMgr picks it up the same way it picks up a
   fresh install: by scanning that directory at its own next boot, which
   restore already prompts for. The one thing that path doesn't reconstruct is
   ipkg's own record of the package, so Software Manager/Preware may not offer
@@ -49,14 +53,29 @@ Everything the stock backup did, because it asks the same services:
   runs — a real, permanent trade-off of this fallback, not a bug. Only
   something to notice if both come up empty: not installed by ipkg at all
   (some app-catalog-installed apps use a different layout), or gone from disk
-  entirely. `com.palm.*`-owned apps are left out of all of this: they come
-  back through the OS/OTA process, not this app's restore. So is anything
-  living in `/usr/palm/applications` — that is the system image, flashed rather
-  than installed, and not the user's to back up. `ipkg` alone will not tell you
-  which those are: its status file is the cryptofs one, but an image is free to
-  seed a stanza there for an app it *baked* into the rootfs, which webOS CE 3.1
-  does for Preware, Govnah and the Synergy runtime so Preware shows them as
-  installed. Anything already
+  entirely. Apps the **system image provides** are left out of all
+  of this — they come back by reflashing, not from a backup. An image supplies
+  an app one of two ways, and both count: *baked* into `/usr/palm/applications`
+  (flashed, so `ipkg` has never heard of it) or *staged* as a preload under
+  `/usr/palm/ipkgs`, which the OS installs into cryptofs on first boot, leaving
+  a record indistinguishable from a user's own install. A package `ipkg` calls
+  installed but which has no cryptofs footprint at all counts too: webOS CE
+  seeds status stanzas for things it bakes at real rootfs paths, like the
+  Synergy runtime, so Preware reports them.
+
+  This replaced a `com.palm.*` name check, which was wrong in both directions on
+  a real device — it skipped `com.palm.app.codepoet.simplechat`, a community app
+  that merely borrows the prefix, while archiving and restoring 11.7MB of
+  QuickOffice that every image already ships. Asking the image what it provides
+  is the actual question.
+
+  Going the other way, `ipkg` is not the only thing that makes an app real: the
+  directory fallback below puts an app back *without* re-creating ipkg's
+  bookkeeping, so anything with an `appinfo.json` in the cryptofs app directory
+  is treated as installed and marked `unmanaged` in the manifest. Without that,
+  an app restored once would silently vanish from every backup taken afterwards.
+
+  Anything already
   present on the device you're restoring onto — never uninstalled, or put back
   manually before running restore — is skipped too, checked against that
   device at restore time, not against what was installed when the backup was
@@ -65,6 +84,21 @@ Everything the stock backup did, because it asks the same services:
   install on webOS 3.0.5 can be baked into the rootfs on CE 3.1, and putting the
   backed-up copy back would not restore it, it would **shadow** the newer system
   copy with a 2013 one.
+
+Every restore leaves a **receipt** next to the backup, in `receipts/`, naming
+what happened to each package — `installed`, `failed`, `not-captured`,
+`already-present` or `image-provided` — plus a summary count. The per-package
+outcome used to exist only in the reply to the app, shown once and then gone,
+which left the one question a migration actually raises ("what did not come
+back, and why?") unanswerable afterwards. The two commonest answers were
+invisible by construction, since a package skipped as already present or as
+image-provided is filtered out long before the reply is built.
+
+App names in that list come from the app's own `appinfo.json`, not from `ipkg`.
+`ipkg list_installed` prints the package's control `Description`, and
+`palm-package` writes `This is a webOS application.` unless the author
+overrides it — on a real 3.0.5 device 56 of 115 installed packages carried that
+placeholder, so a failed one was unidentifiable.
 
 A backup checks that there is room before it starts, and refuses with a clear
 message rather than failing somewhere in the middle. Plus, optionally, user
@@ -112,10 +146,30 @@ your threat model, copy the backup somewhere safe and delete it from the device.
 
 The app id is `com.palm.app.backup` — the id the built-in Backup app uses. The
 package installs to `/media/cryptofs/apps/usr/palm/applications/com.palm.app.backup`,
-while the original stays where it is on the read-only system partition. Two
-directories then claim the same id, which is the usual way an app is overridden
-on this platform, and it is why the id was taken rather than a fresh one
-invented.
+while the original sits on the read-only system partition.
+
+**Two directories claiming one id does not override anything.** An earlier
+version of this file assumed it did — "the usual way an app is overridden on this
+platform" — and that is wrong. Measured on stock 3.0.5, with this app declaring a
+*higher* version than the built-in (3.1.0 against 2.0.0) and after a reboot, the
+launcher entry, `getAppInfo` and the running card all still resolved to
+`/usr/palm/applications/com.palm.app.backup`. The ROM copy simply wins, and
+version does not enter into it. The app installed perfectly and then sat there
+while the tile went on launching the dead built-in.
+
+The tell is subtle enough to be worth writing down: the app *looks* installed.
+`ipkg` lists it, the icon is right, the title is right — because both apps carry
+the same id, icon and title. What gives it away is the text on the main screen.
+The built-in says *"Your HP webOS Account and other personal data…"*; this app
+never mentions HP.
+
+So `postinst` moves the ROM copy aside — `cp -a` to
+`/var/luna/com.palm.app.backup.woce-orig`, then `rm -rf` the original — and
+`prerm` puts it back, the same back-up-once-and-restore shape the TLS packages
+use to swap a stock binary. It refuses to do so unless the ROM copy is *not*
+already this app (on webOS CE the ROM copy **is** this app, baked into the image,
+and moving it would delete the working one) and the device reports the webOS
+version this package targets.
 
 The service could not take the stock service's id to match. `palm-package`
 requires the app id *and* every service id to be a subdomain of the package id,
@@ -247,37 +301,52 @@ service does not, and shipping one for that purpose would be pointless:
   original had.
 
 But *reaching* the private bus and being allowed to *call out* on it turn out
-to be different questions. LunaSysMgr auto-generates a role for every
-third-party JS service with `"outbound": []` hardcoded — measured on device,
-`com.palm.*`-named services get a permissive role instead, regardless of
-where they're installed from or what they declare. Without matching that, the
-one call the entire backup depends on, `com.palm.db/internal/preBackup`,
-comes back as an unknown method.
+to be different questions. LunaSysMgr auto-generates a role for every installed
+JS service from `/usr/palm/ls2/templates/Triton.prv`, which hardcodes
+`"outbound": []`. The **pub** template grants `outbound: ["*"]`; the private one
+does not.
 
-Naming the service `com.palm.app.backup.service` should put it on the
-permissive side of that rule by itself. The daemon used to write a role of our
-own to force it, and deliberately no longer does: the hub already has a
-generated role claiming this name, and a second role file naming the same
-service in its `permissions` block throws *"Attempting to add duplicate service
-name to permission map"* — which drops **both** grants. The workaround would
-take out the thing it was working around.
+An earlier version of this file claimed a `com.palm.*`-named service was given a
+permissive private role instead, and that naming the service
+`com.palm.app.backup.service` was therefore enough on its own. **That is wrong.**
+Measured on stock webOS 3.0.5, the generated
+`/var/palm/ls2/roles/prv/com.palm.app.backup.service.json` is the template
+verbatim, `outbound: []` and all — the prefix buys nothing here.
 
-What the daemon still writes at every startup is the role for its private
-`luna-send` copy (`woce-lunacall`, running as `com.palm.backup.privileged`) and
-a direct edit to `/etc/palm/mojodb.conf` granting that name db8's admin role —
-see the top of `device/woce-backupd.js` for why each is needed and why neither
-has a real API to request through instead. That pair is also the fallback if
-the prefix rule turns out not to work the way it was measured: whenever a
-direct private-bus call comes back "unknown method", the call is retried
-through the helper.
+The failure is not a clean error, which is what made it easy to believe
+otherwise. The service starts, calls `com.palm.activitymanager`, and the hub
+refuses it:
 
-Both are written to disk immediately, during `postinst`'s own first start of
-the daemon — nothing to run by hand. But `ls-hubd` and `mojodb-luna` each read
+```
+ls-hubd: ERROR: "com.palm.app.backup.service" does not have sufficient outbound
+permissions to communicate with "com.palm.activitymanager"
+```
+
+after which the service never answers anything again — `healthcheck` included.
+
+So `ensureServiceRole()` **rewrites** that generated file to grant
+`outbound: ["*"]`. Rewriting is the whole trick: it must never add a *second*
+role file naming the service, because two of them make the hub throw
+*"Attempting to add duplicate service name to permission map"* and drop **both**
+grants. Same path, same filename, different contents. It stands down entirely
+when `/usr/share/ls2/roles/prv/com.palm.app.backup.service.json` exists, because
+an image that bakes the role owns it and ours would be the duplicate.
+
+The daemon also writes, at every startup, the role for its private `luna-send`
+copy (`woce-lunacall`, running as `com.palm.backup.privileged`) and a direct
+edit to `/etc/palm/mojodb.conf` granting that name db8's admin role — see the top
+of `device/woce-backupd.js` for why each is needed and why neither has a real API
+to request through instead.
+
+All three are written to disk immediately, during `postinst`'s own first start
+of the daemon — nothing to run by hand. But `ls-hubd` and `mojodb-luna` each read
 their configuration once, at their own startup, not on every change to the
 file — so **the very first install needs one reboot** afterward before the
-grants actually take effect. It is not independently confirmed here how much
-works in the narrow window before that first reboot, so treat the reboot as the
-actual last install step rather than an optional cleanup. An upgrade over an
+grants actually take effect. Before that reboot the service does not work at
+all, and says nothing about why: measured on 3.0.5, `healthcheck` simply never
+returns. Treat the reboot as the actual last install step, not an optional
+cleanup — the feed metadata sets `PostInstallFlags: ["RestartDevice"]` so Preware
+prompts for it. An upgrade over an
 existing install doesn't need another reboot — the grants from the first
 install are already in place.
 
@@ -386,6 +455,27 @@ cat /var/log/woce-backupd.log
 Then confirm `/media/internal/webos-backups/manifests/000001-<nduId>` exists and
 parses, that a second backup dedups instead of re-storing, and that
 `getBackupStatus` reports `privileged: true`.
+
+The root helper is the part `run-tests.js` cannot reach at all — the suite
+stubs `privileged.*` wholesale, so every one of its own ops is device-only.
+They can be driven directly through the job protocol the service uses, which is
+how the whole-package archive and the restore allowlist were verified:
+
+```bash
+J=/media/internal/.woce-backup/jobs
+echo '{"id":"p1","op":"listInstalledApps"}' > $J/p1.tmp && mv $J/p1.tmp $J/p1.job
+sleep 3 && cat $J/p1.done       # packages[] vs romApps[]
+
+echo '{"id":"p2","op":"archivePackages","packages":[{"id":"com.example.app"}],
+       "destDir":"/media/internal/.woce-backup/stage/probe/"}' > $J/p2.tmp
+mv $J/p2.tmp $J/p2.job
+tar tzf .../com.example.app-app.tar.gz | cut -d/ -f1-4 | sort -u
+```
+
+Worth exercising deliberately: a tarball whose member escapes with `..`, and one
+naming a path outside `OWNED_SUBTREES`. Both must come back in `failed` with
+nothing written — that allowlist is the only thing standing between a tampered
+backup target and an arbitrary root-owned write.
 
 ## Credit
 

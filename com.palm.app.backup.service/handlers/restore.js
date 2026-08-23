@@ -279,9 +279,17 @@ function RestoreAssistant() {
             var restoreFuture = privileged.restoreAppDirectories(toRestore);
             restoreFuture.then(this, function (rf) {
                 var restoreResult = rf.exception ? { restored: [], failed: toRestore.map(function (e) { return e.id; }) } : rf.result;
+                // An app put back this way had its service registered by hand
+                // (the installer never ran), and that registration only takes
+                // effect at the next boot - so the app works and its service
+                // does not, until then. Carried up through the result rather
+                // than written into doRestore's scope: this function is a
+                // sibling of doRestore, not nested inside it.
                 rf.result = {
                     installed: restoreResult.restored || [],
-                    failed: fetchFailed.concat(restoreResult.failed || [])
+                    failed: fetchFailed.concat(restoreResult.failed || []),
+                    failureReasons: restoreResult.failureReasons || {},
+                    servicesRegistered: restoreResult.servicesRegistered || []
                 };
             });
             f.nest(restoreFuture);
@@ -479,6 +487,15 @@ function RestoreAssistant() {
         var failedPackages = [];
         var restorableCandidates = [];   // manifest.packages, minus system apps and anything already installed
         var packageOpTimedOut = false;   // a package op is still running out there
+        // Why each package was left out, kept apart rather than merged: the
+        // receipt below has to be able to say "you already have it" and "the
+        // image provides it" separately, because they mean different things to
+        // someone asking why an app did not come back.
+        var presentIds = {};             // ipkg already has it on THIS device
+        var imageIds = {};               // baked or preloaded by the system image
+        var receipt = null;              // built at the end, written to the target
+        var serviceRegisteredIds = {};   // put back by directory fallback AND had a service
+        var restoreFailureReasons = {};  // id -> why the directory restore failed
 
         skipped = [];
 
@@ -588,6 +605,7 @@ function RestoreAssistant() {
             var alreadyInstalled = {};
             (result.packages || []).forEach(function (pkg) {
                 alreadyInstalled[pkg.id] = true;
+                presentIds[pkg.id] = true;
             });
             // Anything the system image provides - baked into the rootfs, or
             // staged as a preload it installs on first boot - is already here
@@ -603,6 +621,7 @@ function RestoreAssistant() {
             // ways - see listImageApps in device/woce-backupd.js.
             (result.romApps || []).forEach(function (id) {
                 alreadyInstalled[id] = true;
+                imageIds[id] = true;
             });
             restorableCandidates = restorableCandidates.filter(function (pkg) {
                 return !alreadyInstalled[pkg.id];
@@ -639,6 +658,19 @@ function RestoreAssistant() {
             var result = f.result;
             installedPackages = installedPackages.concat(result.installed || []);
             failedPackages = failedPackages.concat(result.failed || []);
+            (result.servicesRegistered || []).forEach(function (id) {
+                serviceRegisteredIds[id] = true;
+            });
+            // Same carry as serviceRegisteredIds above, and for the same
+            // reason: written here, in doRestore's own chain, because the
+            // function that produced it is a sibling and cannot reach this
+            // scope. withTimeout's fallback result has no reasons at all.
+            var reasons = result.failureReasons || {};
+            for (var failedId in reasons) {
+                if (reasons.hasOwnProperty(failedId)) {
+                    restoreFailureReasons[failedId] = reasons[failedId];
+                }
+            }
             packageOpTimedOut = packageOpTimedOut || (result.timedOut === true);
             progress(92);
 
@@ -683,6 +715,92 @@ function RestoreAssistant() {
             var result = f.result;
             manifest.restoredCount = (manifest.restoredCount || 0) + 1;
             manifest.lastRestored = dateUtil.formatDateRfc1123(new Date());
+
+            /* A durable receipt of what this restore actually did.
+             *
+             * The per-package outcome used to exist only in the reply to the
+             * subscribing app: shown once, then gone. After a migration the one
+             * question people ask is "what did NOT come back, and why", and
+             * nothing on disk could answer it - not the manifest (it records
+             * what was backed up, not what was put back), not the helper log
+             * (a tally of successes). Worse, the two most common answers are
+             * invisible by construction, because a package skipped as already
+             * present or as image-provided is filtered out long before the
+             * result is built.
+             *
+             * Written through the target, not to a fixed path, so it travels
+             * with the backup like the manifest does; under receipts/ rather
+             * than manifests/ so listLocalManifests never sees it (its regex
+             * would reject it anyway, but a manifest directory holding
+             * non-manifests is a trap for the next reader).
+             */
+            var installedSetR = {};
+            installedPackages.forEach(function (id) { installedSetR[id] = true; });
+            var failedSetR = {};
+            failedPackages.forEach(function (id) { failedSetR[id] = true; });
+
+            var counts = {
+                installed: 0, failed: 0, notCaptured: 0,
+                alreadyPresent: 0, imageProvided: 0
+            };
+            var receiptPackages = (manifest.packages || []).map(function (pkg) {
+                var outcome;
+                if (imageIds[pkg.id]) {
+                    outcome = "image-provided";     // reflashing brings it back
+                } else if (presentIds[pkg.id]) {
+                    outcome = "already-present";    // never uninstalled here
+                } else if (installedSetR[pkg.id]) {
+                    outcome = "installed";
+                } else if (!pkg.archived && !pkg.dirBackedUp) {
+                    outcome = "not-captured";       // the backup never held it
+                } else {
+                    outcome = "failed";             // had it, could not put it back
+                }
+                counts[{
+                    "installed": "installed",
+                    "failed": "failed",
+                    "not-captured": "notCaptured",
+                    "already-present": "alreadyPresent",
+                    "image-provided": "imageProvided"
+                }[outcome]] += 1;
+                var entry = {
+                    id: pkg.id,
+                    title: pkg.title,
+                    version: pkg.version,
+                    outcome: outcome
+                };
+                if (outcome === "failed" && restoreFailureReasons[pkg.id]) {
+                    // "failed" on its own sent a whole release cycle looking
+                    // for a corrupt archive when the real answer was a budget
+                    // that ran out. Put the reason where the user reads it.
+                    entry.note = restoreFailureReasons[pkg.id];
+                }
+                if (outcome === "not-captured" && pkg.archiveError) {
+                    // Carry the backup-time reason forward: "not captured" on
+                    // its own does not tell you whether the app was never
+                    // there or was too big to archive in the time allowed.
+                    entry.note = pkg.archiveError;
+                }
+                if (serviceRegisteredIds[pkg.id]) {
+                    // Registered by us, not by ipkg: live only after the reboot.
+                    entry.serviceRegistered = true;
+                    entry.note = "service registered by restore; needs the reboot to start";
+                }
+                return entry;
+            });
+
+            receipt = {
+                manifestName: manifestName,
+                restoredAt:   manifest.lastRestored,
+                restoreCount: manifest.restoredCount,
+                backedUpFrom: manifest.deviceInfo,
+                backedUpOs:   manifest.osVersion,
+                summary:      counts,
+                skipped:      skipped,
+                packages:     receiptPackages
+            };
+            counts.servicesRegistered = Object.keys(serviceRegisteredIds).length;
+            logger.log("Restore receipt:", JSON.stringify(counts));
             // Lives on the manifest, not in this device's own prefs: the
             // point is "has this backup been restored", which travels with
             // it the same way the manifest itself does, not just "restored
@@ -690,6 +808,13 @@ function RestoreAssistant() {
             // above - the restore already succeeded, and a failed write-back
             // here must not turn that into a reported failure.
             f.nest(tolerate(backup.storeManifest(target, manifest, manifestName), null));
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            // Best-effort, like the manifest write-back above: a restore that
+            // worked must not be reported as failed because a report about it
+            // could not be written.
+            f.nest(tolerate(backup.storeRestoreReceipt(target, receipt, manifestName), null));
         });
         future.then(this, function (f) {
             var result = f.result;
