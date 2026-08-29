@@ -1319,6 +1319,28 @@ async function main() {
     check("and the files only the other device's manifest references are not swept",
         foreignSurvived, "want " + foreignFiles.join(",") + " in " + storedAfter.join(","));
 
+    /* ---- the cache must mirror the target's CONTENT, not just its names ---- */
+    section("Manifest cache collision");
+
+    // Manifest names are NNNNNN-<nduId> and are NOT unique: the counter restarts
+    // whenever a store is cleared, while /media/internal survives a Doctor
+    // flash. So the local cache can hold a DIFFERENT backup under a name the
+    // target also has. Reconciling by name alone (fetch what we lack, drop what
+    // the target lacks) left such a copy untouched, and restores then read it --
+    // once restoring 6 files out of a 115-package backup and reporting success.
+    var cacheNames = listFilesIn(manifestDir());
+    var victim = cacheNames[cacheNames.length - 1];
+    var cachedPath = path.join(ROOT, "work", "manifests", victim);
+    var targetPath = path.join(manifestDir(), victim);
+    fs.writeFileSync(cachedPath, JSON.stringify({
+        note: "a different backup that happens to share this name",
+        services: [], packages: []
+    }));
+    await run(context, "ListBackupsAssistant", {});
+    check("a cached manifest whose content differs from the target is refreshed",
+        fs.readFileSync(cachedPath, "utf8") === fs.readFileSync(targetPath, "utf8"),
+        "cache still holds: " + fs.readFileSync(cachedPath, "utf8").slice(0, 70));
+
     /* ---- summary ---- */
     console.log("\n" + passed + " passed, " + failed + " failed");
     rmrf(ROOT);

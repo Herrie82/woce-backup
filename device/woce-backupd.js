@@ -66,7 +66,7 @@ var exec = require('child_process').exec;
 // Rewritten by build.sh. Reported in the ping reply and logged by the
 // service, so "Root helper available, version X" says which daemon code is
 // actually live — upstart will not restart a running job on its own.
-var VERSION = "3.1.0+20260822-213315";
+var VERSION = "3.1.1+20260829-154547";
 
 var SERVICE_ID = "com.palm.app.backup.service";
 
