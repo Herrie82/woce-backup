@@ -98,12 +98,16 @@ if [ -z "$IPK" ]; then
 fi
 echo "  $IPK"
 
-# Also rewrites the control file from packaging/preware.json: palm-package's
-# placeholder Section/Maintainer/Description leave the package untitled and
-# filed under "Unsorted" in Preware, and the feed metadata it parses (title,
-# category, description, licence, RestartDevice flag) lives in the one-line
-# Source JSON blob that only this step adds.
-echo "Injecting postinst/prerm and feed metadata..."
+# This step does three things beyond the scripts. It rewrites the control file
+# from packaging/preware.json: palm-package's placeholder
+# Section/Maintainer/Description leave the package untitled and filed under
+# "Unsorted" in Preware, and the feed metadata it parses (title, category,
+# description, licence, RestartDevice flag) lives in the one-line Source JSON
+# blob that only this step adds. And it strips packaging/package-exclude.txt's
+# patterns out of data.tar.gz — palm-package copies a package directory
+# wholesale apart from hidden and VCS files, which is how a CLAUDE.md ended up
+# installed under /usr/palm/applications in 3.1.1.
+echo "Injecting postinst/prerm and feed metadata, stripping dev files..."
 "$PYTHON" tools/repack_ipk.py "$IPK" device/postinst device/prerm packaging/preware.json
 
 echo

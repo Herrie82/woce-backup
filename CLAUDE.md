@@ -554,6 +554,17 @@ Reference sources live in the 3.0.5 Doctor extract at
 - **`postinst` never lands on the device.** It lives in `control.tar.gz` and is
   run by ipkg during install. The daemon it installs is at
   `/usr/bin/woce-backupd.js`; the bundle copy is under the app's `device/`.
+- **`palm-package` copies a package directory wholesale.** It drops hidden
+  files, VCS and Eclipse metadata and `.ipk`s, and nothing else — so
+  `com.palm.app.backup/CLAUDE.md` shipped in 3.1.1 as
+  `/usr/palm/applications/com.palm.app.backup/CLAUDE.md`. Patterns for
+  everything that must not reach the device live in
+  `packaging/package-exclude.txt`, and `tools/repack_ipk.py` strips them out of
+  `data.tar.gz` and then re-reads the archive to prove they are gone. It is
+  done there, not by passing `--exclude-from` to `palm-package`, because an SDK
+  build that does not know the option aborts packaging outright and `build.sh`
+  still looks for the old Windows SDK. Add a pattern there rather than deleting
+  the file from the tree.
 - **Registration files need trimming before `JSON.parse`.** The stock
   `com.palm.keymanager` ends with `}` plus four spaces, which node 0.2 rejects.
 - **Backups are deliberately unencrypted.** Do not "fix" this; see README.

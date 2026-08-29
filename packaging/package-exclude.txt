@@ -1,0 +1,24 @@
+# Files that must never reach the device, stripped from data.tar.gz by
+# tools/repack_ipk.py after palm-package has run.
+#
+# palm-package already drops hidden files, VCS metadata, Eclipse metadata and
+# .ipk files; everything below is stuff it has no opinion about and would
+# happily copy into /usr/palm/applications. CLAUDE.md is the one that actually
+# shipped: com.palm.app.backup/CLAUDE.md is a working note for this repo, and
+# it landed in 3.1.1 as /usr/palm/applications/com.palm.app.backup/CLAUDE.md.
+#
+# One pattern per line, * and ? wildcards, # for comments. A pattern without a
+# slash matches any path component (so a directory pattern takes its contents
+# with it); a pattern with a slash matches the whole path inside the package.
+
+CLAUDE.md
+AGENTS.md
+.claude
+node_modules
+__pycache__
+*.orig
+*.rej
+*.bak
+*~
+.DS_Store
+Thumbs.db

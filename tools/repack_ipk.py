@@ -14,12 +14,24 @@ Preware renders as an untitled package in "Unsorted". Passing a metadata JSON
 file rewrites those fields and adds the one-line `Source` JSON blob Preware
 parses for the title, category, description, licence and post-install flags.
 
+It also strips development files out of data.tar.gz. palm-package excludes
+hidden files, VCS and Eclipse metadata and .ipk files, but nothing else, so a
+note left in a package directory is copied straight to /usr/palm/applications
+— which is how CLAUDE.md shipped in 3.1.1. The patterns live in
+packaging/package-exclude.txt. This is done here rather than by passing
+--exclude-from to palm-package because an SDK build that does not recognise the
+option aborts the whole packaging step, and the older Windows SDK is one of the
+paths build.sh looks for.
+
 Usage:  repack_ipk.py <package.ipk> <postinst> <prerm> [metadata.json]
+                      [--exclude-from=PATFILE]
 """
 
+import fnmatch
 import io
 import json
 import os
+import posixpath
 import sys
 import tarfile
 import time
@@ -125,6 +137,83 @@ def apply_metadata(control_text, meta):
     return "".join("%s: %s\n" % (name, value) for name, value in fields)
 
 
+def load_patterns(path):
+    """Returns the exclude patterns in path; blank lines and # comments out."""
+    patterns = []
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line and not line.startswith("#"):
+                patterns.append(line)
+    return patterns
+
+
+def is_excluded(name, patterns):
+    """True if the tar member name matches any pattern.
+
+    Names arrive as "./usr/palm/applications/<id>/CLAUDE.md". A pattern with a
+    slash is matched against the whole path from the package root; one without
+    is matched against every component, so naming a directory takes everything
+    under it as well.
+    """
+    relative = posixpath.normpath(name.lstrip("./"))
+    if relative in (".", ""):
+        return False
+
+    for pattern in patterns:
+        if "/" in pattern:
+            if fnmatch.fnmatch(relative, pattern.strip("/")):
+                return True
+        elif any(fnmatch.fnmatch(part, pattern)
+                 for part in relative.split("/")):
+            return True
+    return False
+
+
+def strip_data(data_gz, patterns):
+    """Returns (new data.tar.gz, [names removed]).
+
+    The original is handed back untouched when nothing matches, so a clean
+    build produces the archive palm-package wrote rather than a re-rolled one.
+    """
+    entries = []
+    removed = []
+
+    with tarfile.open(fileobj=io.BytesIO(data_gz), mode="r:gz") as source:
+        for member in source.getmembers():
+            if is_excluded(member.name, patterns):
+                # Directories are dropped whole: their contents match too, by
+                # the component rule above.
+                if member.isfile() or member.isdir():
+                    removed.append(member.name.lstrip("./"))
+                continue
+            payload = source.extractfile(member).read() if member.isfile() else None
+            entries.append((member, payload))
+
+    if not removed:
+        return data_gz, []
+
+    # GNU_FORMAT rather than Python's default PAX: a path over 100 characters
+    # makes PAX emit an extended header, which busybox tar on device renders as
+    # a stray PaxHeaders file next to the real one. Nothing here is close to
+    # that today (the longest is 80), but the failure would be silent and would
+    # land on the device, and GNU long names are understood there.
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz",
+                      format=tarfile.GNU_FORMAT) as target:
+        for member, payload in entries:
+            if payload is None:
+                target.addfile(member)
+            else:
+                target.addfile(member, io.BytesIO(payload))
+
+    # Installed-Size is left as palm-package computed it. It is an estimate the
+    # installer uses for a free-space check, and one that is a few KB high errs
+    # in the safe direction; recomputing it would mean guessing at the SDK's
+    # own formula.
+    return output.getvalue(), removed
+
+
 def rebuild_control(control_gz, scripts, meta=None):
     """Returns a new control.tar.gz with the given scripts added.
 
@@ -171,16 +260,33 @@ def rebuild_control(control_gz, scripts, meta=None):
     return output.getvalue()
 
 
+# Beside the script's own repo, so the build finds it without being told and a
+# run from any directory still strips the same things.
+DEFAULT_EXCLUDE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "packaging", "package-exclude.txt")
+
+
 def main():
-    if len(sys.argv) not in (4, 5):
+    args = list(sys.argv[1:])
+
+    patfile = DEFAULT_EXCLUDE_FILE
+    for arg in list(args):
+        if arg.startswith("--exclude-from="):
+            patfile = arg.split("=", 1)[1]
+            args.remove(arg)
+
+    if len(args) not in (3, 4):
         raise SystemExit(__doc__)
 
-    ipk, postinst, prerm = sys.argv[1], sys.argv[2], sys.argv[3]
-    metafile = sys.argv[4] if len(sys.argv) == 5 else None
+    ipk, postinst, prerm = args[0], args[1], args[2]
+    metafile = args[3] if len(args) == 4 else None
 
-    for path in [ipk, postinst, prerm] + ([metafile] if metafile else []):
+    for path in [ipk, postinst, prerm, patfile] + ([metafile] if metafile else []):
         if not os.path.isfile(path):
             raise SystemExit("Not found: %s" % path)
+
+    patterns = load_patterns(patfile)
 
     meta = None
     if metafile:
@@ -195,9 +301,12 @@ def main():
     scripts = {"postinst": postinst, "prerm": prerm}
 
     rebuilt = []
+    stripped = []
     for name, data in members:
         if name == "control.tar.gz":
             data = rebuild_control(data, scripts, meta)
+        elif name == "data.tar.gz":
+            data, stripped = strip_data(data, patterns)
         rebuilt.append((name, data))
 
     write_ar(ipk, rebuilt)
@@ -212,6 +321,18 @@ def main():
             raise SystemExit("Verification failed: %s missing from control.tar.gz" % required)
 
     print("  control.tar.gz now contains: %s" % ", ".join(sorted(present)))
+
+    # Read data.tar.gz back too: this is the check that the package really is
+    # free of them, not just that the strip pass thought it was.
+    with tarfile.open(fileobj=io.BytesIO(verify["data.tar.gz"]), mode="r:gz") as check:
+        survivors = [m.name.lstrip("./") for m in check.getmembers()
+                     if is_excluded(m.name, patterns)]
+    if survivors:
+        raise SystemExit("Verification failed: %s still in data.tar.gz"
+                         % ", ".join(sorted(survivors)))
+
+    for name in sorted(stripped):
+        print("  stripped from data.tar.gz: %s" % name)
 
     if meta:
         with tarfile.open(fileobj=io.BytesIO(verify["control.tar.gz"]),
