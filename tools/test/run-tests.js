@@ -1319,6 +1319,56 @@ async function main() {
     check("and the files only the other device's manifest references are not swept",
         foreignSurvived, "want " + foreignFiles.join(",") + " in " + storedAfter.join(","));
 
+    /* ---- a failed run must not leak what it already stored ---- */
+    section("Failure leaves no orphans");
+
+    // A backup stores each file as it goes and writes the manifest LAST, so a
+    // run that dies partway has already put files in the store that no manifest
+    // will ever reference. Only the success path used to purge, so every
+    // failure leaked at full size -- and the leak made the next run likelier to
+    // fail the same way. Measured on a daily driver (2026-08-29): two failed
+    // runs left two unreferenced copies of a 295MB app archive, /media/internal
+    // hit 100%, and every subsequent backup died with ENOSPC.
+    //
+    // Failing at storeManifest reproduces that shape exactly: all the file
+    // transfers have happened, the manifest has not.
+    state.notesPayload = "a note that is not yet in the store\n";
+    var failCtx = harness.loadService({
+        root: ROOT,
+        services: buildServices(),
+        quiet: !process.env.VERBOSE
+    });
+    vm.runInContext(
+        "backup.storeManifest = function () {" +
+        "  var f = new Future();" +
+        "  setTimeout(function () { f.exception = new Error('storeManifest boom'); }, 5);" +
+        "  return f;" +
+        "};", failCtx);
+
+    var storedBefore = listFilesIn(fileStoreDir()).length;
+    var manifestsBefore = listFilesIn(manifestDir()).length;
+    // NB: not `failed` -- that is the suite's own failure counter.
+    var failedRun = await run(failCtx, "BackupAssistant", {}, []);
+
+    check("the run reports failure",
+        !!failedRun.error || (failedRun.result && failedRun.result.STATUS === "Failed"),
+        JSON.stringify(failedRun.result || failedRun.error && failedRun.error.message));
+
+    // Every file in the store must be referenced by some manifest.
+    var referenced = {};
+    listFilesIn(manifestDir()).forEach(function (name) {
+        var m = JSON.parse(fs.readFileSync(path.join(manifestDir(), name), "utf8"));
+        storedNamesOf(m).forEach(function (stored) { referenced[stored] = true; });
+    });
+    var orphans = listFilesIn(fileStoreDir()).filter(function (name) {
+        return !referenced[name];
+    });
+    check("a failed backup leaves no unreferenced files behind",
+        orphans.length === 0, "orphans: " + orphans.join(", "));
+    check("and it does not delete the good backups that were already there",
+        listFilesIn(manifestDir()).length === manifestsBefore,
+        "manifests " + manifestsBefore + " -> " + listFilesIn(manifestDir()).length);
+
     /* ---- the cache must mirror the target's CONTENT, not just its names ---- */
     section("Manifest cache collision");
 
