@@ -638,7 +638,7 @@ enyo.kind({
                         { content: target.label, className: "target-name" },
                         { content: target.description, className: "target-description" }
                     ]},
-                    { content: target.selected ? "✓" : "", className: "target-check" }
+                    { content: "", className: target.selected ? "target-check target-check-on" : "target-check" }
                 ]
             }, { owner: self }));
         });

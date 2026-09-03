@@ -6,8 +6,15 @@
  * app did not have.
  */
 
+/* The stock app was built for the TouchPad's 1024px viewport, where a fixed
+   500px column always fit. LuneOS hands a phone a much narrower one - 450px on
+   a 1080x1920 device - so a fixed width overflows to the right and clips the
+   toggle, the row values and the notice text. Keep 500px as the ceiling so the
+   layout is unchanged where there is room, and let it shrink where there is
+   not. */
 .box-center {
 	width: 500px;
+	max-width: 100%;
 	margin: 23px auto 0;
 }
 
@@ -19,6 +26,9 @@
 
 .box {
 	width: 496px;
+	/* -6px, not 100%: .enyo-group carries a 3px margin, so an unqualified 100%
+	   makes these info boxes sit 3px wider than the rows above and below them. */
+	max-width: calc(100% - 6px);
 	font-size: .9rem;
 	line-height: 1.3;
 	text-align: left;
@@ -115,10 +125,26 @@
 	word-wrap: break-word;
 }
 
+/* U+2713 CHECK MARK has no glyph in any font on the LuneOS stack - Prelude,
+   Prelude Medium, Segoe UI, Arial, Helvetica and the sans-serif fallback all
+   miss it, so the selected target rendered a tofu box. Draw the tick from
+   borders instead: no font dependency, and it still inherits the colour. */
 .target-check {
 	color: #3a7bd5;
 	font-size: 1.2rem;
 	padding-left: 10px;
+}
+
+.target-check-on::after {
+	content: "";
+	display: block;
+	width: .34em;
+	height: .7em;
+	margin-top: .1em;
+	border: solid currentColor;
+	border-width: 0 .15em .15em 0;
+	-webkit-transform: rotate(45deg);
+	transform: rotate(45deg);
 }
 
 /* Restore flow */
@@ -159,4 +185,7 @@
 
 .popup {
 	width: 420px;
+	/* Narrow viewports again: a popup wider than the screen cannot be dismissed,
+	   because its buttons sit off the right edge. */
+	max-width: 92%;
 }
