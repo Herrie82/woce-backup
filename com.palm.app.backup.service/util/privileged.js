@@ -599,11 +599,366 @@ var privileged = (function () {
         return submit({ op: "readRegistrations" }, 30000);
     };
 
+    /* ------------------------------------------------- packages, direct mode
+     *
+     * These four were left to the daemon when the rest moved inline, on the
+     * reasoning that package work is the risky part. On LuneOS that was simply
+     * wrong: there is no daemon, so every one of them wrote a job file nobody
+     * would ever read and then waited out its timeout. A backup spent 60
+     * seconds doing nothing and recorded an empty app list, and said Complete.
+     *
+     * The layout differs from webOS 3.0.5 in three ways that matter:
+     *
+     *   - the tool is opkg, not ipkg, and the subcommand is `list-installed`
+     *     rather than `list_installed`;
+     *   - third-party apps still live under /media/cryptofs/apps, but the
+     *     package database is opkg's (var/lib/opkg) rather than ipkg's
+     *     (usr/lib/ipkg/info), which exists but is vestigial;
+     *   - nothing caches .ipk files. Neither of the daemon's two search
+     *     directories held a single one on a real device, so the archive path
+     *     that matters here is the directory fallback, not the .ipk copy.
+     *
+     * That last point is what the opkg metadata below is for. The daemon's own
+     * comment concedes that a directory restore leaves the package manager
+     * unaware of the app - runnable, but not manageable or cleanly removable.
+     * We can do better, because opkg keeps its whole record of an app in three
+     * small files, so they travel in the same tarball and the app comes back
+     * properly installed rather than merely present.
+     */
+    var APPS_ROOT   = "/media/cryptofs/apps";
+    var APPS_DIR    = APPS_ROOT + "/usr/palm/applications/";
+    var OPKG_DIR    = APPS_ROOT + "/var/lib/opkg";
+    var OPKG_STATUS = OPKG_DIR + "/status";
+    var OPKG_INFO   = OPKG_DIR + "/info/";
+    var ROM_APPS_DIR = "/usr/palm/applications/";
+
+    // The stanza for one package, carried inside its own archive so a
+    // directory restore can put opkg's record back too. Named with a leading
+    // dot so it cannot collide with anything opkg itself owns.
+    var STATUS_MEMBER = ".woce-opkg-status";
+
+    /* Waydroid publishes an appinfo.json shortcut for every Android app it
+     * runs. They are generated, not installed: no opkg record, and the
+     * Waydroid integration recreates them from the Android side. Backing them
+     * up would archive eleven stubs on a device I checked, and restoring them
+     * would plant launcher icons for Android apps that may not be there any
+     * more. Matched on the id prefix, which is what generates them.
+     */
+    var isGeneratedStub = function (appId) {
+        return String(appId).indexOf("waydroid.") === 0;
+    };
+
+    var readAppInfo = function (appId) {
+        try {
+            return JSON.parse(fs.readFileSync(APPS_DIR + appId + "/appinfo.json", "utf8"));
+        } catch (err) {
+            return null;
+        }
+    };
+
+    direct.listInstalledApps = function () {
+        var future = new Future();
+        var romApps = [];
+
+        try {
+            romApps = fs.readdirSync(ROM_APPS_DIR);
+        } catch (err) {
+            logger.warn("Could not read", ROM_APPS_DIR + ":", err.message);
+        }
+
+        exec("opkg -o " + APPS_ROOT + " list-installed", { timeout: 45000 },
+            function (error, stdout) {
+                var packages = [];
+                var known = {};
+
+                if (error) {
+                    // Not fatal: the directory scan below still finds apps.
+                    logger.warn("opkg list-installed failed:", error.message);
+                }
+
+                String(stdout || "").split("\n").forEach(function (raw) {
+                    var line = raw.replace(/^\s+|\s+$/g, "");
+                    if (line.length === 0) {
+                        return;
+                    }
+                    // "com.example.app - 1.0.0", optionally " - description".
+                    var parts = line.split(" - ");
+                    if (parts.length < 2) {
+                        return;
+                    }
+                    var id = parts[0].replace(/^\s+|\s+$/g, "");
+                    if (isGeneratedStub(id)) {
+                        return;
+                    }
+                    var info = readAppInfo(id);
+                    packages.push({
+                        id:      id,
+                        version: parts[1].replace(/^\s+|\s+$/g, ""),
+                        title:   (info && info.title) || id
+                    });
+                    known[id] = true;
+                });
+
+                /* An app put back by the directory fallback is real and
+                 * launchable but, before the opkg metadata went into the
+                 * archive, was invisible to list-installed - and would then
+                 * drop out of every later backup. Anything with an appinfo.json
+                 * counts as installed whatever opkg thinks.
+                 */
+                var appDirs = [];
+                try {
+                    appDirs = fs.readdirSync(APPS_DIR);
+                } catch (err2) {
+                    appDirs = [];
+                }
+                appDirs.forEach(function (appId) {
+                    if (known[appId] || isGeneratedStub(appId)) {
+                        return;
+                    }
+                    var info = readAppInfo(appId);
+                    if (!info) {
+                        return;
+                    }
+                    packages.push({
+                        id:        appId,
+                        version:   info.version || "0.0.0",
+                        title:     info.title || appId,
+                        unmanaged: true
+                    });
+                    known[appId] = true;
+                });
+
+                logger.log("Found", packages.length, "installed app(s),",
+                    romApps.length, "from the system image");
+                future.result = {
+                    returnValue: true,
+                    packages: packages,
+                    romApps: romApps
+                };
+            });
+
+        return future;
+    };
+
+    /* One tarball per app, rooted at /media/cryptofs/apps so it unpacks back
+     * over the same paths, carrying the app directory and opkg's record of it.
+     */
+    direct.archivePackages = function (packages, destDir) {
+        var future = new Future();
+        var archived = [];
+        var archivedDirs = [];
+        var archiveFailures = [];
+        var queue = (packages || []).slice(0);
+
+        var finish = function () {
+            future.result = {
+                returnValue: true,
+                archived: archived,
+                archivedDirs: archivedDirs,
+                failures: archiveFailures
+            };
+        };
+
+        var next = function () {
+            if (queue.length === 0) {
+                return finish();
+            }
+            var pkg = queue.shift();
+            var id = pkg && pkg.id;
+
+            if (!id || isGeneratedStub(id)) {
+                return next();
+            }
+            if (!statOrNull(APPS_DIR + id)) {
+                archiveFailures.push({ id: id, reason: "no installed directory" });
+                return next();
+            }
+
+            // opkg's status file is one shared file, so the package's own
+            // stanza is extracted into the archive rather than the file itself
+            // - restoring the whole thing would wipe out records for apps this
+            // backup never knew about.
+            var members = ["usr/palm/applications/" + id];
+            try {
+                var stanza = stanzaFor(id);
+                if (stanza) {
+                    fs.writeFileSync(APPS_ROOT + "/" + STATUS_MEMBER, stanza, "utf8");
+                    members.push(STATUS_MEMBER);
+                }
+            } catch (err) {
+                logger.warn("Could not stage the opkg stanza for", id + ":", err.message);
+            }
+            ["control", "list"].forEach(function (ext) {
+                if (statOrNull(OPKG_INFO + id + "." + ext)) {
+                    members.push("var/lib/opkg/info/" + id + "." + ext);
+                }
+            });
+
+            // "-app.tar.gz", not ".tar.gz": handlers/backup.js rebuilds this
+            // name from the id to find the staged file, and restore looks for
+            // the same. The daemon's naming is the contract.
+            var target = path.join(destDir, id + "-app.tar.gz");
+            mkdirsSync(destDir);
+            exec("tar czf '" + target + "' -C " + APPS_ROOT + " " + members.join(" "),
+                { timeout: 300000, maxBuffer: 1024 * 1024 },
+                function (error) {
+                    try {
+                        fs.unlinkSync(APPS_ROOT + "/" + STATUS_MEMBER);
+                    } catch (ignored) {}
+
+                    if (error) {
+                        logger.warn("Could not archive", id + ":", error.message);
+                        archiveFailures.push({ id: id, reason: error.message });
+                    } else {
+                        // Plain id, like the daemon: the caller builds a set of
+                        // these to mark pkg.dirBackedUp, and an object here
+                        // stringified into "[object Object]-app.tar.gz".
+                        archivedDirs.push(id);
+                    }
+                    next();
+                });
+        };
+
+        next();
+        return future;
+    };
+
+    /** The status stanza for one package, or null. */
+    var stanzaFor = function (id) {
+        var text;
+        try {
+            text = fs.readFileSync(OPKG_STATUS, "utf8");
+        } catch (err) {
+            return null;
+        }
+        var blocks = text.split(/\n\s*\n/);
+        for (var i = 0; i < blocks.length; i++) {
+            if (new RegExp("^Package:\\s*" + id + "\\s*$", "m").test(blocks[i])) {
+                return blocks[i].replace(/\s+$/, "") + "\n";
+            }
+        }
+        return null;
+    };
+
+    direct.installPackages = function (files) {
+        var future = new Future();
+        var installed = [];
+        var failed = [];
+        var queue = (files || []).slice(0);
+
+        var next = function () {
+            if (queue.length === 0) {
+                future.result = { returnValue: true, installed: installed, failed: failed };
+                return;
+            }
+            var entry = queue.shift();
+            // Same bound the daemon puts on this op: an installer runs
+            // arbitrary maintainer scripts as root, so it may only ever come
+            // from our own work area, never from a path a manifest names.
+            if (!entry || !entry.path || String(entry.path).indexOf(WORK_ROOT) !== 0) {
+                logger.warn("Refusing to install from outside the work area:", entry && entry.path);
+                failed.push((entry && entry.id) || "(unknown)");
+                return next();
+            }
+            exec("opkg -o " + APPS_ROOT + " --force-reinstall install '" + entry.path + "'",
+                { timeout: 300000, maxBuffer: 1024 * 1024 },
+                function (error) {
+                    if (error) {
+                        logger.warn("Could not install", entry.id + ":", error.message);
+                        failed.push(entry.id);
+                    } else {
+                        installed.push(entry.id);
+                    }
+                    next();
+                });
+        };
+
+        next();
+        return future;
+    };
+
+    /* Unpacks an archivePackages tarball back over /media/cryptofs/apps and
+     * folds its opkg stanza into the status file, so the app returns installed
+     * rather than merely present.
+     */
+    direct.restoreAppDirectories = function (files) {
+        var future = new Future();
+        var restored = [];
+        var failed = [];
+        var queue = (files || []).slice(0);
+
+        var mergeStanza = function (id) {
+            var staged = APPS_ROOT + "/" + STATUS_MEMBER;
+            var stanza;
+            try {
+                stanza = fs.readFileSync(staged, "utf8");
+            } catch (err) {
+                return;
+            }
+            try {
+                fs.unlinkSync(staged);
+            } catch (ignored) {}
+
+            // Replaced, not appended, if opkg already has a record: two stanzas
+            // for one package is a corrupt status file.
+            if (stanzaFor(id)) {
+                return;
+            }
+            try {
+                var current = "";
+                try {
+                    current = fs.readFileSync(OPKG_STATUS, "utf8");
+                } catch (err2) {
+                    current = "";
+                }
+                if (current.length > 0 && !/\n\n$/.test(current)) {
+                    current = current.replace(/\s*$/, "\n\n");
+                }
+                fs.writeFileSync(OPKG_STATUS, current + stanza + "\n", "utf8");
+            } catch (err3) {
+                logger.warn("Could not record", id, "with opkg:", err3.message);
+            }
+        };
+
+        var next = function () {
+            if (queue.length === 0) {
+                future.result = { returnValue: true, restored: restored, failed: failed };
+                return;
+            }
+            var entry = queue.shift();
+            if (!entry || !entry.path || String(entry.path).indexOf(WORK_ROOT) !== 0) {
+                logger.warn("Refusing to unpack from outside the work area:", entry && entry.path);
+                failed.push((entry && entry.id) || "(unknown)");
+                return next();
+            }
+            mkdirsSync(APPS_DIR);
+            mkdirsSync(OPKG_INFO);
+            exec("tar xzf '" + entry.path + "' -C " + APPS_ROOT,
+                { timeout: 300000, maxBuffer: 1024 * 1024 },
+                function (error) {
+                    if (error) {
+                        logger.warn("Could not unpack", entry.id + ":", error.message);
+                        failed.push(entry.id);
+                    } else {
+                        mergeStanza(entry.id);
+                        restored.push(entry.id);
+                    }
+                    next();
+                });
+        };
+
+        next();
+        return future;
+    };
+
     /**
-     * The installed third-party package list, from ipkg. Recorded in the
-     * manifest so a restore can report (or reinstall) what was on the device.
+     * The installed third-party package list. Recorded in the manifest so a
+     * restore can report (or reinstall) what was on the device.
      */
     that.listInstalledApps = function () {
+        if (directMode) {
+            return direct.listInstalledApps();
+        }
         return submit({ op: "listInstalledApps" }, 60000);
     };
 
@@ -618,6 +973,9 @@ var privileged = (function () {
         if (!packages || packages.length === 0) {
             return new Future({ archived: [], archivedDirs: [] });
         }
+        if (directMode) {
+            return direct.archivePackages(packages, destDir);
+        }
         return submit({ op: "archivePackages", packages: packages, destDir: destDir },
             timeout || packageOpBudget(packages.length));
     };
@@ -631,6 +989,9 @@ var privileged = (function () {
         if (!files || files.length === 0) {
             return new Future({ installed: [], failed: [] });
         }
+        if (directMode) {
+            return direct.installPackages(files);
+        }
         return submit({ op: "installPackages", files: files },
             timeout || packageOpBudget(files.length));
     };
@@ -643,6 +1004,9 @@ var privileged = (function () {
     that.restoreAppDirectories = function (files, timeout) {
         if (!files || files.length === 0) {
             return new Future({ restored: [], failed: [] });
+        }
+        if (directMode) {
+            return direct.restoreAppDirectories(files);
         }
         return submit({ op: "restoreAppDirectories", files: files },
             timeout || packageOpBudget(files.length));
@@ -667,6 +1031,18 @@ var privileged = (function () {
      * on disk to do it.
      */
     that.isRestorableDest = isRestorableDest;
+
+    /**
+     * Test seam: forces direct mode on, so the inline implementations can be
+     * exercised off-device. The real probe needs uid 0 and readable
+     * /var/preferences and /media/cryptofs, none of which hold on a build
+     * machine - and without this the package ops would silently fall through
+     * to the job-file path the tests are not about.
+     */
+    that.setDirectModeForTesting = function (value) {
+        directMode = value;
+        available = value;
+    };
 
     /**
      * Test seam: lets unit checks force the probe result.

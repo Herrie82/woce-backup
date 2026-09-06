@@ -608,6 +608,91 @@ async function main() {
     // the call the whole backup depends on — only on the private one, reporting
     // it as an unknown method. That has to route through the root helper, not
     // fail the run: com.palm.db is a required service.
+    /* Installed-app discovery in direct mode.
+     *
+     * Driven with the exact shape two real LuneOS devices produce: a sargo with
+     * two genuinely installed apps, and a tissot whose eleven
+     * waydroid.* entries are appinfo.json shortcuts the Waydroid integration
+     * generates for Android apps. Those carry no opkg record and are recreated
+     * from the Android side, so archiving them would back up stubs and a
+     * restore would plant launcher icons for apps that may be long gone. */
+    section("Installed apps, direct mode");
+
+    var APPS = "/media/cryptofs/apps/usr/palm/applications/";
+    var appFixture = {
+        // What `opkg -o /media/cryptofs/apps list-installed` prints on sargo.
+        opkg: "com.achunt.jukie - 2.0.0\norg.webosarchive.flyingtoasters - 1.1.2\n",
+        dirs: ["com.achunt.jukie", "org.webosarchive.flyingtoasters",
+               "waydroid.org.lineageos.jelly", "waydroid.com.android.settings",
+               "org.webosports.app.restoredbyhand"]
+    };
+
+    var realFs = require("fs");
+    var appCtx = harness.loadService({
+        root: ROOT,
+        services: services,
+        quiet: !process.env.VERBOSE,
+        require: function (name) {
+            if (name === "child_process") {
+                return { exec: function (cmd, opts, cb) {
+                    var done = cb || opts;
+                    if (String(cmd).indexOf("list-installed") !== -1) {
+                        return setTimeout(function () { done(null, appFixture.opkg, ""); }, 1);
+                    }
+                    return setTimeout(function () { done(null, "", ""); }, 1);
+                } };
+            }
+            if (name === "fs") {
+                var shim = Object.create(realFs);
+                shim.readdirSync = function (dir) {
+                    if (dir === APPS) { return appFixture.dirs; }
+                    if (dir === "/usr/palm/applications/") { return ["com.palm.app.email"]; }
+                    return realFs.readdirSync(dir);
+                };
+                shim.readFileSync = function (file, enc) {
+                    var m = String(file).match(/applications\/([^\/]+)\/appinfo\.json$/);
+                    if (m) {
+                        return JSON.stringify({ id: m[1], title: "T-" + m[1], version: "9.9.9" });
+                    }
+                    return realFs.readFileSync(file, enc);
+                };
+                return shim;
+            }
+            return require(name);
+        }
+    });
+    vm.runInContext("privileged.setDirectModeForTesting(true);", appCtx);
+
+    var apps = await new Promise(function (resolve) {
+        vm.runInContext("__apps = privileged.listInstalledApps();", appCtx);
+        appCtx.__apps.settle(function (err, result) { resolve({ error: err, result: result }); });
+    });
+    var ids = ((apps.result && apps.result.packages) || []).map(function (p) { return p.id; }).sort();
+
+    check("the two opkg-installed apps are found",
+        ids.indexOf("com.achunt.jukie") !== -1 &&
+            ids.indexOf("org.webosarchive.flyingtoasters") !== -1,
+        JSON.stringify(ids));
+    check("waydroid shortcuts are not treated as installed apps",
+        ids.filter(function (id) { return id.indexOf("waydroid.") === 0; }).length === 0,
+        JSON.stringify(ids));
+    // An app the directory fallback put back has no opkg record, so opkg cannot
+    // see it - and before it was picked up here it would drop out of every
+    // later backup.
+    check("an app with only a directory is still found, and marked unmanaged",
+        ids.indexOf("org.webosports.app.restoredbyhand") !== -1 &&
+            (apps.result.packages.filter(function (p) {
+                return p.id === "org.webosports.app.restoredbyhand";
+            })[0] || {}).unmanaged === true,
+        JSON.stringify(ids));
+    check("the version comes from opkg, not from appinfo",
+        (apps.result.packages.filter(function (p) {
+            return p.id === "com.achunt.jukie";
+        })[0] || {}).version === "2.0.0");
+    check("system-image apps are reported separately",
+        (apps.result.romApps || []).indexOf("com.palm.app.email") !== -1,
+        JSON.stringify(apps.result.romApps));
+
     /* The restore destination allowlist. A backup sits on /media/internal,
      * which is exported to a PC as USB mass storage, so the paths in its
      * manifest are untrusted input being handed to a process running as root. */
