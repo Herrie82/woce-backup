@@ -9,7 +9,7 @@
  *     argument as a regex, so any path containing '.' or '(' matches wrongly.
  *     Replaced with indexOf/slice versions.
  */
-/*global Future, logger, setTimeout */
+/*global Buffer, Future, logger, require, setTimeout */
 
 // Service working area. Inside the triton jail /media/internal is mounted rw,
 // which is why every path we own lives under it.
@@ -35,6 +35,55 @@ var FILES_PATH     = "files/";
 // nothing about which backup service is asking, so every system service that
 // participated in Palm backup participates here too, unmodified.
 var STATIC_SERVICES_ROOT = "/etc/palm/backup/";
+
+/* Does this path exist? — the one API that is spelled differently on every
+ * runtime this service has to run on.
+ *
+ *   node 0.2 (webOS 3.0.5)  path.exists only. No fs.exists, no fs.existsSync.
+ *   node 0.8 - 0.10         fs.exists; path.exists deprecated, then removed.
+ *   node 22 / 24 (LuneOS)   fs.access; fs.exists deprecated; path.exists gone,
+ *                           and calling it took the service down during setup
+ *                           ("TypeError: path.exists is not a function").
+ *
+ * Resolved once, here, rather than re-tested at every call. The callback shape
+ * is path.exists's — exists(true|false), no error argument — so call sites read
+ * identically on all three.
+ */
+var pathExists = (function () {
+    var fs   = require('fs');
+    var path = require('path');
+
+    if (typeof fs.access === 'function') {
+        return function (target, callback) {
+            fs.access(target, function (err) { callback(!err); });
+        };
+    }
+    if (typeof fs.exists === 'function') {
+        // Not passed by reference: fs.exists is deprecated on newer runtimes and
+        // wrapping keeps the call site out of any bound-method surprises.
+        return function (target, callback) { fs.exists(target, callback); };
+    }
+    return function (target, callback) { path.exists(target, callback); };
+}());
+
+/* Allocate a byte buffer — the other API that is spelled differently per
+ * runtime, and the other one that will eventually stop existing.
+ *
+ *   node 0.2 (webOS 3.0.5)  new Buffer(size) is the only spelling there is.
+ *   node 22 / 24 (LuneOS)   new Buffer() has been runtime-deprecated since v10
+ *                           (DEP0005) and prints a DeprecationWarning on every
+ *                           call. It still works today; the whole point of
+ *                           routing through here is that the day it does not,
+ *                           this is one line rather than five call sites.
+ *
+ * Buffer.alloc zero-fills where new Buffer(size) handed back whatever was in
+ * memory. Every use here writes before it reads, so the fill is not needed —
+ * but it is cheap at these sizes and strictly the safer default, so it is not
+ * worth reaching for allocUnsafe to avoid it.
+ */
+var allocBuffer = (typeof Buffer.alloc === "function")
+    ? function (size) { return Buffer.alloc(size); }
+    : function (size) { return new Buffer(size); };
 
 // Runs fun over arr sequentially, collecting the results. Sequential rather
 // than parallel is intentional: preBackup calls mutate shared temp space.

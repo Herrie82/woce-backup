@@ -41,7 +41,7 @@ var privileged = (function () {
     var awaitResult = function (future, resultPath, timeout, elapsed) {
         elapsed = elapsed || 0;
 
-        path.exists(resultPath, function (exists) {
+        pathExists(resultPath, function (exists) {
             if (exists) {
                 fs.readFile(resultPath, "utf8", function (err, data) {
                     // The result file has served its purpose either way.

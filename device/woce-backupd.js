@@ -119,6 +119,17 @@ function log(message) {
 
 /* ------------------------------------------------------------- filesystem */
 
+/* new Buffer(size) is runtime-deprecated on modern node (DEP0005) and prints a
+ * warning on every call; Buffer.alloc does not exist on the node 0.2 that webOS
+ * 3.0.5 ships. One place to change when new Buffer finally goes.
+ *
+ * This daemon is a standalone root process, not one of the service's sources,
+ * so it cannot share common.js's copy of this.
+ */
+var allocBuffer = (typeof Buffer.alloc === "function")
+    ? function (size) { return Buffer.alloc(size); }
+    : function (size) { return new Buffer(size); };
+
 function statOrNull(target) {
     try {
         return fs.statSync(target);
@@ -153,7 +164,7 @@ function copyFileSync(from, to) {
     // Chunked rather than one readFileSync: a media file can be far larger than
     // the memory this device is willing to give us.
     var CHUNK = 65536;
-    var buffer = new Buffer(CHUNK);
+    var buffer = allocBuffer(CHUNK);
     var input  = fs.openSync(from, "r");
     var output;
 
@@ -961,12 +972,12 @@ var normalizeGzipMtime = function (file) {
     var fd = null;
     try {
         fd = fs.openSync(file, "r+");
-        var head = new Buffer(4);
+        var head = allocBuffer(4);
         if (fs.readSync(fd, head, 0, 4, 0) !== 4 || head[0] !== 0x1f || head[1] !== 0x8b) {
             log("not a gzip file, leaving header alone: " + file);
             return false;
         }
-        var zeros = new Buffer(4);
+        var zeros = allocBuffer(4);
         zeros[0] = 0; zeros[1] = 0; zeros[2] = 0; zeros[3] = 0;
         fs.writeSync(fd, zeros, 0, 4, 4);
         return true;

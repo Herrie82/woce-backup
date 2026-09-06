@@ -1391,6 +1391,108 @@ async function main() {
         fs.readFileSync(cachedPath, "utf8") === fs.readFileSync(targetPath, "utf8"),
         "cache still holds: " + fs.readFileSync(cachedPath, "utf8").slice(0, 70));
 
+    /* ---- pathExists and allocBuffer across node vintages ---- */
+    section("Old-node APIs resolve on every runtime this service runs on");
+
+    // The service has to load on webOS 3.0.5's node 0.2 and on LuneOS's node 22,
+    // and the three of them spell "does this path exist" differently. Getting it
+    // wrong is not a graceful degradation: on node 22 the missing path.exists
+    // took the service down inside ServiceAssistant.setup, before it answered
+    // anything at all. Stand in each vintage's fs/path and check the helper both
+    // resolves and answers correctly.
+    //
+    // Only the two properties under test are masked; everything else still comes
+    // from the real modules, so the rest of the service loads normally.
+    // node 0.2 has no Buffer.alloc, only `new Buffer(size)`. A plain object
+    // would not do: the fallback branch constructs it, so the stand-in has to
+    // be constructible. Returning an object from a constructor overrides
+    // `this`, so `new Legacy(4)` yields a real 4-byte Buffer while the type
+    // itself carries no .alloc - which is exactly the shape under test.
+    function bufferVintage(shape) {
+        if (shape !== "node0.2") {
+            return Buffer;
+        }
+        return function (arg) {
+            return Buffer.alloc(typeof arg === "number" ? arg : 0);
+        };
+    }
+
+    function nodeVintage(shape) {
+        var realFs = require("fs");
+        var realPath = require("path");
+        var fakeFs = Object.create(realFs);
+        var fakePath = Object.create(realPath);
+
+        if (shape === "node0.2") {
+            // path.exists only - no fs.exists, no fs.access, no fs.existsSync.
+            fakeFs.access = undefined;
+            fakeFs.exists = undefined;
+            fakePath.exists = function (target, callback) {
+                realFs.stat(target, function (err) { callback(!err); });
+            };
+        } else if (shape === "node0.8") {
+            // fs.exists, but fs.access is not there yet (it arrived in 0.11).
+            fakeFs.access = undefined;
+        }
+        // "modern" masks nothing: fs.access is present and wins.
+
+        return function (name) {
+            if (name === "fs") { return fakeFs; }
+            if (name === "path") { return fakePath; }
+            return require(name);
+        };
+    }
+
+    var presentFile = path.join(ROOT, "pathexists-present");
+    fs.writeFileSync(presentFile, "x");
+    var absentFile = path.join(ROOT, "pathexists-absent");
+
+    var vintages = ["node0.2", "node0.8", "modern"];
+    for (var vi = 0; vi < vintages.length; vi++) {
+        var shape = vintages[vi];
+        var vintageCtx = null;
+        try {
+            vintageCtx = harness.loadService({
+                root: path.join(ROOT, "vintage-" + shape),
+                quiet: true,
+                require: nodeVintage(shape),
+                Buffer: bufferVintage(shape)
+            });
+        } catch (err) {
+            check(shape + ": service loads", false, err.message);
+            continue;
+        }
+        check(shape + ": service loads", true);
+        check(shape + ": pathExists is a function",
+            vm.runInContext("typeof pathExists", vintageCtx) === "function");
+
+        vm.runInContext("__peHits = [];", vintageCtx);
+        vintageCtx.__present = presentFile;
+        vintageCtx.__absent = absentFile;
+        vm.runInContext(
+            "pathExists(__present, function (e) { __peHits.push(['present', e]); });" +
+            "pathExists(__absent,  function (e) { __peHits.push(['absent', e]); });",
+            vintageCtx);
+
+        await new Promise(function (resolve) { setTimeout(resolve, 50); });
+
+        var hits = vm.runInContext("JSON.stringify(__peHits)", vintageCtx);
+        var parsed = JSON.parse(hits);
+        var got = {};
+        parsed.forEach(function (h) { got[h[0]] = h[1]; });
+        check(shape + ": existing path reports true", got.present === true, hits);
+        check(shape + ": missing path reports false", got.absent === false, hits);
+
+        // allocBuffer is the same problem in the other direction: Buffer.alloc
+        // does not exist on 0.2, and new Buffer() is deprecated and slated to
+        // go on 22/24. Both spellings have to keep working.
+        check(shape + ": allocBuffer is a function",
+            vm.runInContext("typeof allocBuffer", vintageCtx) === "function");
+        check(shape + ": allocBuffer returns a buffer of the right size",
+            vm.runInContext("(function(){var b = allocBuffer(7);" +
+                "return (typeof b.length === 'number' ? b.length : -1);}())", vintageCtx) === 7);
+    }
+
     /* ---- summary ---- */
     console.log("\n" + passed + " passed, " + failed + " failed");
     rmrf(ROOT);

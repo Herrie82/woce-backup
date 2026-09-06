@@ -5,7 +5,7 @@
  * restorable after a doctor, when the keymanager device key no longer exists.
  * gzip is kept — it is what makes the db8 dumps a reasonable size.
  */
-/*global Future, logger, mapFuture, require */
+/*global Future, logger, mapFuture, pathExists, require */
 
 var fileUtil = (function () {
     var that = {};
@@ -23,7 +23,7 @@ var fileUtil = (function () {
      */
     that.listFiles = function (dir, filterFunction) {
         var future = new Future();
-        path.exists(dir, function (exists) {
+        pathExists(dir, function (exists) {
             if (!exists) {
                 future.result = [];
             } else {
@@ -54,7 +54,7 @@ var fileUtil = (function () {
         var dirExists;
         var parent = path.dirname(dir);
 
-        path.exists(dir, function (exists) {
+        pathExists(dir, function (exists) {
             dirExists = exists;
             future.result = true;
         });
@@ -130,7 +130,7 @@ var fileUtil = (function () {
 
     that.exists = function (filepath) {
         var future = new Future();
-        path.exists(filepath, function (fileExists) {
+        pathExists(filepath, function (fileExists) {
             future.result = fileExists;
         });
         return future;
@@ -157,7 +157,7 @@ var fileUtil = (function () {
 
     that.rmIfExists = function (filepath) {
         var future = new Future();
-        path.exists(filepath, function (exists) {
+        pathExists(filepath, function (exists) {
             if (exists) {
                 future.nest(that.rm(filepath));
             } else {
