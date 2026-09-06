@@ -588,6 +588,41 @@ async function main() {
     // the call the whole backup depends on — only on the private one, reporting
     // it as an unknown method. That has to route through the root helper, not
     // fail the run: com.palm.db is a required service.
+    /* The restore destination allowlist. A backup sits on /media/internal,
+     * which is exported to a PC as USB mass storage, so the paths in its
+     * manifest are untrusted input being handed to a process running as root. */
+    section("Restore destination policy");
+
+    var destCtx = harness.loadService({ root: ROOT, services: services, quiet: !process.env.VERBOSE });
+    var permits = function (p) {
+        destCtx.__destProbe = p;
+        vm.runInContext("__destResult = privileged.isRestorableDest(__destProbe);", destCtx);
+        return destCtx.__destResult;
+    };
+
+    check("a real preferences destination is allowed",
+        permits("/var/preferences/com.palm.display/prefsDB.sl") ===
+            "/var/preferences/com.palm.display/prefsDB.sl");
+    check("a real luna destination is allowed",
+        permits("/var/luna/preferences/universalsearchprefs.db") !== null);
+    check("the media destination is allowed", permits("/media/internal/photo.jpg") !== null);
+    check("an executable destination is refused", permits("/usr/bin/luna-next") === null);
+    check("an init script destination is refused", permits("/etc/init.d/evil") === null);
+    check("a library destination is refused", permits("/lib/ld-linux.so") === null);
+    // Denied even though /var/palm/ itself is allowed: an ls2 role file lets
+    // any caller register as any service on the bus.
+    check("an ls2 role destination is refused inside an allowed root",
+        permits("/var/palm/ls2/roles/anything.json") === null);
+    check("a jail destination is refused inside an allowed root",
+        permits("/var/palm/jail/x") === null);
+    check("the policy matches the 3.0.5 daemon's, root for root",
+        permits("/home/root/x") === null && permits("/etc/palm/luna.conf") === null);
+    check("traversal out of an allowed root is refused",
+        permits("/var/preferences/../../usr/bin/luna-next") === null,
+        String(permits("/var/preferences/../../usr/bin/luna-next")));
+    check("a relative path cannot slip through", permits("../../usr/bin/x") === null);
+    check("an empty destination is refused", permits("") === null && permits(null) === null);
+
     var privCtx = harness.loadService({
         root: ROOT,
         services: buildServices(),
