@@ -10,6 +10,7 @@
     { "source": "util/date-util.js" },
     { "source": "util/file-util.js" },
     { "source": "util/privileged.js" },
+    { "source": "util/platform.js" },
     { "source": "util/system.js" },
     { "source": "util/prefs.js" },
     { "source": "util/user-data.js" },

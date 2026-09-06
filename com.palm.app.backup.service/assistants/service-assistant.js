@@ -5,7 +5,7 @@
  * util/backup-service.js because an in-flight backup outlives the command
  * assistant that started it.
  */
-/*global logger, fileUtil, WORK_ROOT, MANIFEST_ROOT, JOB_ROOT, STAGE_ROOT */
+/*global backup, logger, fileUtil, platform, WORK_ROOT, MANIFEST_ROOT, JOB_ROOT, STAGE_ROOT */
 
 // Rewritten by build.sh on every build. Logged at startup so the device
 // log says which code is actually running — a reinstall does not restart a
@@ -18,6 +18,10 @@ function ServiceAssistant() {
 
 ServiceAssistant.prototype.setup = function () {
     logger.log("woce-backup service starting, build", SERVICE_BUILD);
+    // Worth one line at startup: it decides every platform service name
+    // used below, so a manifest with an empty battery or connection list
+    // can be read against what this device actually resolved to.
+    logger.log("Platform:", platform.describe());
 
     // Create the working tree up front. Every later path assumes it exists, and
     // doing it once here keeps the mkdirs out of the hot paths.

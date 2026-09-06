@@ -7,16 +7,19 @@
  * the file-cache temp dir is how services hand us their data and the
  * connection check is what a Synergy target will need later.
  */
-/*global Future, PalmCall, logger, isEmpty, require, fileUtil, privileged, tolerate, WORK_ROOT */
+/*global allocBuffer, Future, PalmCall, logger, isEmpty, platform, require, fileUtil,
+  privileged, tolerate, WORK_ROOT */
 
 var system = (function () {
     var that = {};
 
-    var SYSTEM_SERVICE_URL     = "palm://com.palm.systemservice";
-    var CONNECTION_MANAGER_URL = "palm://com.palm.connectionmanager";
-    var POWER_SERVICE_URL      = "palm://com.palm.power";
-    var ACTIVITY_MANAGER_URL   = "palm://com.palm.activitymanager";
-    var FILE_CACHE_ID          = "com.palm.filecache";
+    // Resolved per platform - these were renamed on the OSE bus and nothing
+    // aliases the old names. See util/platform.js.
+    var SYSTEM_SERVICE_URL     = platform.url("systemservice");
+    var CONNECTION_MANAGER_URL = platform.url("connectionmanager");
+    var POWER_SERVICE_URL      = platform.url("power");
+    var ACTIVITY_MANAGER_URL   = platform.url("activitymanager");
+    var FILE_CACHE_ID          = platform.service("filecache");
 
     // The stock backup service's file cache type, registered on every webOS
     // 3.0.5 device by /etc/palm/filecache_types/backuptempdir. Reused rather
@@ -114,7 +117,13 @@ var system = (function () {
     };
 
     that.getDeviceProfile = function () {
-        var future = that.palmcall("com.palm.deviceprofile", "getDeviceProfile", {});
+        var profileService = platform.service("deviceprofile");
+        if (profileService === null) {
+            // No counterpart on the OSE bus. Callers all tolerate an empty
+            // profile; failing fast beats a guaranteed round trip to nothing.
+            return failedFuture(new Error("com.palm.deviceprofile does not exist on this platform"));
+        }
+        var future = that.palmcall(profileService, "getDeviceProfile", {});
         future.then(this, function (f) {
             var result = f.result;
             var deviceInfo = result.deviceInfo || {};
@@ -133,6 +142,48 @@ var system = (function () {
      * so a public-bus caller cannot launch it and gets "Service does not
      * exist". Reading the node is both simpler and more reliable.
      */
+    /**
+     * `nyx-cmd DeviceInfo query nduid`, or null when nyx-cmd is absent or the
+     * query is not implemented on this device. Returns a Future when it runs at
+     * all, so getNduId can hand it straight back.
+     *
+     * Not every DeviceInfo query is implemented per platform - serial_number
+     * answers "Error: Query not implemented" on a mindphone while nduid answers
+     * fine - so the output is validated rather than trusted.
+     */
+    var nduIdFromNyx = function () {
+        var exec = require('child_process').exec;
+        var future = new Future();
+
+        exec("nyx-cmd DeviceInfo query nduid", { timeout: 10000 },
+            function (error, stdout) {
+                if (error) {
+                    logger.log("nyx-cmd nduid failed:", error.message);
+                    future.result = null;
+                    return;
+                }
+                var value = String(stdout).replace(/[^0-9a-zA-Z]/g, "");
+                // "Error: Query not implemented" survives that filter as text,
+                // so require it to look like an identifier and not like prose.
+                if (!value || /^Error/i.test(String(stdout))) {
+                    future.result = null;
+                    return;
+                }
+                future.result = value;
+            });
+
+        var wrapped = new Future();
+        future.then(this, function (f) {
+            var result = f.result;
+            if (result) {
+                logger.log("nduId from nyx:", result);
+            }
+            f.result = result;
+        });
+        wrapped.nest(future);
+        return wrapped;
+    };
+
     that.getNduId = function () {
         var fs = require('fs');
         var nduId = null;
@@ -143,7 +194,7 @@ var system = (function () {
         // hands back an empty string without ever reading anything.
         try {
             fd = fs.openSync("/dev/nduid", "r");
-            var buffer = new Buffer(128);
+            var buffer = allocBuffer(128);
             var read = fs.readSync(fd, buffer, 0, 128, null);
             if (read > 0) {
                 nduId = buffer.toString("utf8", 0, read).replace(/[^0-9a-zA-Z]/g, "");
@@ -160,19 +211,41 @@ var system = (function () {
             return new Future(nduId);
         }
 
-        // Fall back to the device profile, for a device that does not expose
-        // the node. Kept synchronous on purpose: the previous version chained
-        // this inside an fs callback, where `this` is not the system object.
-        // Foundations asserts its scope is an object, so it threw — and a throw
-        // inside an fs callback is outside any future's reach, which took the
-        // whole service process down without logging anything.
-        logger.warn("No nduId from /dev/nduid, asking the device profile");
-        var profile = tolerate(that.getDeviceProfile(), {});
-        profile.then(this, function (f) {
-            var result = f.result;
-            f.result = (result && result.nduId) || null;
+        // No /dev/nduid. On the OSE bus there is no such node and no
+        // com.palm.deviceprofile either, but nyx knows the same identifier -
+        // `nyx-cmd DeviceInfo query nduid` returns the device's nduid, distinct
+        // per device and stable across reboots. Without this the manifest is
+        // named "000001-Unknown" on every LuneOS device, which matters: the
+        // manifest directory is <seq>-<nduId> and restoring another device's
+        // backup keys off it.
+        // Then nyx, then the device profile. Chained rather than tested for
+        // truthiness: nduIdFromNyx returns a Future, and a Future is always
+        // truthy, so `if (nyx) return nyx` would swallow the profile fallback
+        // on every device without nyx-cmd.
+        //
+        // The profile step stays as it was. Kept out of an fs callback on
+        // purpose: `this` is not the system object in there, Foundations
+        // asserts its scope is an object, so it threw - and a throw inside an
+        // fs callback is outside any future's reach, which took the whole
+        // service process down without logging anything.
+        logger.warn("No nduId from /dev/nduid, asking nyx");
+
+        var future = nduIdFromNyx();
+        future.then(this, function (f) {
+            var fromNyx = f.exception ? null : f.result;
+            if (fromNyx) {
+                f.result = fromNyx;
+                return;
+            }
+            logger.warn("No nduId from nyx either, asking the device profile");
+            var profile = tolerate(that.getDeviceProfile(), {});
+            profile.then(this, function (pf) {
+                var result = pf.result;
+                pf.result = (result && result.nduId) || null;
+            });
+            f.nest(profile);
         });
-        return profile;
+        return future;
     };
 
     that.getDeviceName = function () {
@@ -362,7 +435,7 @@ var system = (function () {
             }
         };
 
-        return that.palmcall("com.palm.activitymanager", "create", {
+        return that.palmcall(platform.service("activitymanager"), "create", {
             activity: activity,
             start: true,
             replace: true
@@ -374,7 +447,7 @@ var system = (function () {
      * opting out twice must not fail.
      */
     that.cancelScheduledActivity = function () {
-        var future = that.palmcall("com.palm.activitymanager", "cancel", {
+        var future = that.palmcall(platform.service("activitymanager"), "cancel", {
             activityName: "com.palm.app.backup.service.scheduled"
         });
         future.then(this, function (f) {
