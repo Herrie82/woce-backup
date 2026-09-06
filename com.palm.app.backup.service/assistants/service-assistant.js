@@ -38,6 +38,16 @@ ServiceAssistant.prototype.setup = function () {
         if (f.exception) {
             logger.error("Unable to create the working tree:", f.exception.message);
         }
+        // Create the dynamic-service kind now rather than on first register().
+        // Nothing on this platform registers dynamically today, so without it
+        // every backup and restore logged "kind not registered" - a permanent
+        // error line for a condition that is entirely normal.
+        f.nest(backup.ensureDynamicServiceKind());
+    });
+    future.then(this, function (f) {
+        if (f.exception) {
+            logger.warn("Could not ensure the dynamic service kind:", f.exception.message);
+        }
         f.result = true;
     });
     return future;

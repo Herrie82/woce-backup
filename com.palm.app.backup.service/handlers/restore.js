@@ -341,8 +341,17 @@ function RestoreAssistant() {
         future.then(this, function (f) {
             var result = f.result;
             if (descriptor.preRestore) {
+                // version as a string. com.palm.db's preBackup *returns* it as
+                // a number (8), but its preRestore schema declares
+                // {"version": {"type": "string"}} with additionalProperties
+                // false, so echoing back what it gave us is rejected:
+                //   invalid type for property 'version'
+                // Measured against db8 3.2.0 once the admin patch made these
+                // methods reachable at all. Stringifying is safe for every
+                // other service: the value only has to round-trip, and a
+                // service that returned a string gets its string back.
                 f.nest(callCallback(serviceId, descriptor.preRestore,
-                    { version: service.version }, descriptor));
+                    { version: String(service.version) }, descriptor));
             } else {
                 f.result = { proceed: true };
             }
@@ -388,10 +397,15 @@ function RestoreAssistant() {
             var filenames = (service.files || []).map(function (file) {
                 return file.path;
             });
+            // No version here. The protocol's postRestore is
+            // postRestore(files, tempDir), and com.palm.db enforces exactly
+            // that - its schema is additionalProperties:false over tempDir and
+            // files, so passing version fails the whole call with
+            //   property not allowed - 'version'
+            // which on a real restore means db8's data never lands.
             f.nest(callCallback(serviceId, descriptor.postRestore, {
                 files:   filenames,
-                tempDir: tempDir,
-                version: service.version
+                tempDir: tempDir
             }, descriptor));
         });
         future.then(this, function (f) {
