@@ -94,6 +94,20 @@ enyo.kind({
             ]}
         ]},
 
+        { name: "passphrasePopup", className: "box-center popup", kind: "ModalDialog",
+          caption: $L("Backup passphrase"), components: [
+            { className: "backup-info-text",
+              content: $L("This backup contains saved passwords. Enter the passphrase you chose when it was made. Skip it and everything else still restores - you will just re-enter your passwords.") },
+            { name: "passphraseInput", kind: "PasswordInput", hint: $L("Passphrase"),
+              style: "margin: 10px 0;" },
+            { layoutKind: "HFlexLayout", pack: "center", components: [
+                { kind: "Button", caption: $L("Skip"), onclick: "passphraseSkip",
+                  style: "margin-right: 10px" },
+                { kind: "Button", className: "enyo-button-affirmative",
+                  caption: $L("Restore"), onclick: "passphraseAccept" }
+            ]}
+        ]},
+
         { name: "restore", kind: "BackupService", method: "restore", subscribe: true,
           onSuccess: "restoreSuccess", onFailure: "restoreFailure" },
 
@@ -127,6 +141,10 @@ enyo.kind({
         this.awaitingResponse = false;
         this.failedDueToDroppedConnection = false;
         this.finished = false;
+        // Cleared per run, or a second restore would repeat the first's
+        // passphrase warning even after the user got it right.
+        this.credentialsWarning = null;
+        this.passphraseAsked = false;
         this.canAutoRestart = false;
         this.$.errorPopup.close();
         this.$.progressPanel.setShowing(true);
@@ -155,6 +173,18 @@ enyo.kind({
         this.params = params || {};
         this.finished = false;
 
+        // A backup that carries saved passwords needs the passphrase they were
+        // encrypted with. Ask once, before the run - a restore is long and a
+        // prompt in the middle of one is easy to miss. Nothing else in the
+        // backup depends on the answer, so declining still restores everything
+        // else, which is what the old behaviour was anyway.
+        if (this.params.hasCredentials && !this.params.passphrase && !this.passphraseAsked) {
+            this.passphraseAsked = true;
+            this.$.passphraseInput.setValue("");
+            this.$.passphrasePopup.openAtCenter();
+            return;
+        }
+
         this.$.progressPanel.setShowing(true);
         this.$.donePanel.setShowing(false);
         this.$.statusLabel.setContent("");
@@ -162,6 +192,21 @@ enyo.kind({
         this.$.errorPopup.close();
 
         this.$.restore.call(this.params);
+    },
+
+    passphraseAccept: function () {
+        this.$.passphrasePopup.close();
+        this.params.passphrase = this.$.passphraseInput.getValue();
+        this.$.passphraseInput.setValue("");
+        this.startRestore(this.params);
+    },
+
+    passphraseSkip: function () {
+        this.$.passphrasePopup.close();
+        this.$.passphraseInput.setValue("");
+        // Explicitly nothing: the restore proceeds and the credentials section
+        // simply does not import.
+        this.startRestore(this.params);
     },
 
     restoreSuccess: function (inSender, inResponse) {
@@ -172,6 +217,12 @@ enyo.kind({
             break;
 
         case "Complete":
+            // Surfaced rather than buried: the restore succeeded, but the one
+            // part the user chose a passphrase for did not, and only they can
+            // fix that.
+            if (inResponse.credentialsError) {
+                this.credentialsWarning = inResponse.credentialsError;
+            }
             this.$.progressBar.setPosition(100);
             // The subscription delivers Complete as well as the call's own
             // result, so guard against finishing twice.
@@ -240,6 +291,12 @@ enyo.kind({
         } else {
             this.$.doneButton.setCaption($L("Done"));
             messages.push($L("Restart your device to finish applying the restored data."));
+        }
+
+        // The restore itself succeeded; saved passwords are the one part that
+        // can fail on their own, and the user is the only one who can fix it.
+        if (this.credentialsWarning) {
+            messages.push($L("Your saved passwords were not restored - check the passphrase and restore again if you want them."));
         }
 
         this.$.statusLabel.setContent("");

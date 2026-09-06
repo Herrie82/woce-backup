@@ -26,7 +26,11 @@ var prefs = (function () {
         music:     false,
         documents: false,
         downloads: false,
-        ringtones: false
+        ringtones: false,
+        // Not media, but it belongs in the same "what to back up" selection and
+        // shares its off-by-default reasoning: a woce backup is unencrypted, so
+        // including credentials has to be an explicit choice.
+        passwords: false
     };
 
     var DEFAULTS = {

@@ -135,6 +135,20 @@ enyo.kind({
               onSuccess: "userDataSuccess" }
         ]},
 
+        { name: "passphraseDialog", className: "box-center popup", kind: "ModalDialog",
+          caption: $L("Backup passphrase"), components: [
+            { className: "backup-info-text",
+              content: $L("Choose a passphrase for your saved passwords. You will need the same one to restore them, and nothing else in the backup depends on it.") },
+            { name: "passphraseInput", kind: "PasswordInput", hint: $L("Passphrase"),
+              style: "margin: 10px 0;" },
+            { layoutKind: "HFlexLayout", pack: "center", components: [
+                { kind: "Button", caption: $L("Cancel"), onclick: "passphraseCancel",
+                  style: "margin-right: 10px" },
+                { kind: "Button", className: "enyo-button-affirmative",
+                  caption: $L("Back up"), onclick: "passphraseAccept" }
+            ]}
+        ]},
+
         { kind: "ApplicationManagerService", components: [
             { name: "openHelp", method: "open",
               params: { id: "com.palm.app.help", params: { target: "https://webosarchive.org" } } }
@@ -291,8 +305,9 @@ enyo.kind({
     },
 
     restoreFromList: function (inSender, manifestName) {
+        var backup = (this.backupsByName || {})[manifestName];
         this.showPage("restorePage", rb.$L("Restore"));
-        this.$.restorePage.startWithManifest(manifestName);
+        this.$.restorePage.startWithManifest(manifestName, backupHasCredentials(backup));
     },
 
     restoreFinished: function () {
@@ -346,12 +361,26 @@ enyo.kind({
         this.$.BackupProgressButton.hideSpinner();
 
         var label = label_progress_backup_complete;
-        if (inResponse && inResponse.skipped > 0) {
+        var holdFor;
+
+        if (inResponse && inResponse.credentialsError) {
+            // Ranked above the skipped count deliberately. A skipped file is
+            // visible in the manifest and can be looked at later; a keystore
+            // that would not export leaves a backup that looks complete and has
+            // no passwords in it, and the user would otherwise not find out
+            // until a restore on another device, when nothing can be done.
+            this.warn("credentials not backed up:", inResponse.credentialsError);
+            label = rb.$L("Backup complete - saved passwords were not included");
+            // Held longer than the ordinary completion label, which is only
+            // confirming what the user already expected to happen.
+            holdFor = this.defaultTimeout * 3;
+        } else if (inResponse && inResponse.skipped > 0) {
             label = enyo.macroize(rb.$L("Backup complete ({$count} skipped)"),
                 { count: inResponse.skipped });
         }
+
         this.$.BackupProgressButton.setLabelValue(label);
-        this.scheduleReset();
+        this.scheduleReset(holdFor);
     },
 
     failedBackup: function (inResponse) {
@@ -465,6 +494,43 @@ enyo.kind({
         if (this.backupInProgress || this.cancelInitiated) {
             return;
         }
+
+        // Saved passwords leave keymanager encrypted under a passphrase the
+        // user supplies, so it has to be collected before the run rather than
+        // in the middle of one. Everything else backs up without asking.
+        if (this.credentialsEnabled) {
+            this.pendingFullBackup = full === true;
+            // No setTitle here: the dialog already carries this caption
+            // statically, and ModalDialog publishes `caption`, not `title` - so
+            // the setter may not exist, and a throw inside a click handler is
+            // invisible except as a button that does nothing.
+            this.$.passphraseInput.setValue("");
+            this.$.passphraseDialog.openAtCenter();
+            return;
+        }
+
+        this.beginBackup(full);
+    },
+
+    /** The passphrase prompt's affirmative button. */
+    passphraseAccept: function () {
+        this.$.passphraseDialog.close();
+        this.pendingPassphrase = this.$.passphraseInput.getValue();
+        this.$.passphraseInput.setValue("");
+        // Straight to beginBackup, not back through startBackup: routing back
+        // through it needed a flag to stop it reopening the dialog it had just
+        // answered, and a re-entrancy guard for a straight line is a trap for
+        // whoever edits it next.
+        this.beginBackup(this.pendingFullBackup);
+    },
+
+    passphraseCancel: function () {
+        this.$.passphraseDialog.close();
+        this.$.passphraseInput.setValue("");
+        this.pendingPassphrase = null;
+    },
+
+    beginBackup: function (full) {
         this.lastAction = "BACKUP";
         this.cancelReset();
 
@@ -474,7 +540,12 @@ enyo.kind({
         this.prepareBackup();
 
         this.$.getBackupStatus.call();
-        this.$.startBackup.call({ full: full === true });
+        this.$.startBackup.call({
+            full: full === true,
+            passphrase: this.pendingPassphrase || undefined
+        });
+        // Held no longer than the call that carries it.
+        this.pendingPassphrase = null;
     },
 
     cancelBackupClick: function () {
@@ -674,6 +745,10 @@ enyo.kind({
         if (inResponse.location) {
             this.$.info.setDestination(inResponse.location);
         }
+        this.backupsByName = {};
+        backups.forEach(function (backup) {
+            this.backupsByName[backup.manifestName] = backup;
+        }, this);
         this.$.backupListPage.setBackups(backups, inResponse.location);
     },
 
@@ -686,6 +761,13 @@ enyo.kind({
                 enabled.push(category.label);
             }
         });
+
+        this.credentialsEnabled = false;
+        categories.forEach(function (category) {
+            if (category.id === "passwords" && category.enabled) {
+                this.credentialsEnabled = true;
+            }
+        }, this);
 
         this.$.info.setUserDataSummary(enabled.length === 0
             ? rb.$L("Settings and data")

@@ -479,6 +479,26 @@ async function main() {
     check("static registrations still load",
         loaded.result["com.example.settings"] !== undefined);
 
+    /* A restore must be able to hand a backup's saved passwords back even
+     * though the Passwords category is off, which is its default - and the
+     * default is exactly the state a device is in after the Doctor the backup
+     * was taken to survive. Gating the restore on the local toggle skipped the
+     * very data the run was for, and did it silently. */
+    check("passwords provider stays out of a backup while the category is off",
+        loaded.result["com.palm.backup.credentials"] === undefined);
+
+    var forRestore = await new Promise(function (resolve) {
+        vm.runInContext("__forRestore = backup.loadRegisteredServices({ allProviders: true });", context);
+        context.__forRestore.settle(function (err, result) { resolve({ error: err, result: result }); });
+    });
+    check("restore registers the passwords provider regardless of the toggle",
+        !forRestore.error && forRestore.result["com.palm.backup.credentials"] !== undefined,
+        forRestore.error && forRestore.error.message);
+    check("the provider restore gets is the in-process one",
+        forRestore.result["com.palm.backup.credentials"] &&
+            forRestore.result["com.palm.backup.credentials"].inProcess === true &&
+            forRestore.result["com.palm.backup.credentials"].postRestore === "postRestore");
+
     var unreg = await run(context, "UnregisterAssistant", { service: "com.example.dynamic" });
     check("unregister succeeds", !unreg.error, unreg.error && unreg.error.message);
 

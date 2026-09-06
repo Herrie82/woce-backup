@@ -42,7 +42,7 @@ var FRAMEWORK_KINDS = [
     "VirtualList", "List", "Pane", "Toolbar", "AppMenu", "Popup", "ModalDialog",
     "DialogPrompt", "enyo.DialogPrompt", "Scrim", "Spinner", "SpinnerLarge",
     "ToggleButton", "ProgressBar", "ProgressButton", "PalmService", "Header",
-    "VFlexBox", "HFlexBox", "ApplicationEvents",
+    "VFlexBox", "HFlexBox", "ApplicationEvents", "Input", "PasswordInput",
     "enyo.VFlexBox", "enyo.HFlexBox", "enyo.ProgressButton", "enyo.Control"
 ];
 

@@ -69,14 +69,19 @@ enyo.kind({
     /**
      * Entry point from the backup list, where the user already picked.
      */
-    startWithManifest: function (manifestName) {
+    startWithManifest: function (manifestName, hasCredentials) {
         if (this.active) {
             return;
         }
         this.active = true;
         this.$.restoringPage.reset();
         this.$.pane.selectViewByName("restoringPage");
-        this.$.restoringPage.startRestore({ manifestName: manifestName });
+        this.$.restoringPage.startRestore({
+            manifestName: manifestName,
+            // Whether to ask for the backup passphrase. Decided by the caller,
+            // which is the only side that has the backup's service list.
+            hasCredentials: hasCredentials === true
+        });
     },
 
     getRestoreDevicesSuccess: function (inSender, inResponse) {

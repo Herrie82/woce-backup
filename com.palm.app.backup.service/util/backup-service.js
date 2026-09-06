@@ -10,7 +10,7 @@
  * .enc and getFinalPath has no encrypted branch — see util/file-util.js for
  * why.
  */
-/*global DB, Future, FILES_PATH, MANIFESTS_PATH, RECEIPTS_PATH, MANIFEST_ROOT, fileUtil,
+/*global credentials, DB, Future, FILES_PATH, MANIFESTS_PATH, RECEIPTS_PATH, MANIFEST_ROOT, fileUtil,
   logger, mapFuture, privileged, removeAll, require, system, userData, isEmptyObject,
   STATIC_SERVICES_ROOT,
   zeroPad, dateUtil */
@@ -425,7 +425,20 @@ var backup = (function () {
      * the stock precedence — an app must not be able to shadow a system
      * service's backup behavior by registering over it.
      */
-    that.loadRegisteredServices = function () {
+    /* The services this device can hand backup data to.
+     *
+     * `options.allProviders` includes the in-process providers whatever the
+     * user's category toggles say. Restore passes it; backup does not.
+     *
+     * The toggles are a backup-time choice - "what goes into a backup" - and
+     * reusing them as a restore-time filter gets the primary case exactly
+     * backwards: a device freshly through a Doctor has every category at its
+     * default, so restoring the backup that was taken to survive that Doctor
+     * would find the provider unregistered and skip the very data it was made
+     * for. What is in the archive was already decided when it was written.
+     */
+    that.loadRegisteredServices = function (options) {
+        var allProviders = !!(options && options.allProviders);
         var allServices = {};
         var dynamicServices = {};
         var toDelete = [];
@@ -459,8 +472,22 @@ var backup = (function () {
         });
         future.then(this, function (f) {
             var userDataEnabled = f.result;
-            if (userDataEnabled) {
+            if (userDataEnabled || allProviders) {
                 allServices[userData.SERVICE_ID] = {
+                    preBackup:   "preBackup",
+                    postRestore: "postRestore",
+                    inProcess:   true
+                };
+            }
+            f.nest(credentials.isEnabled());
+        });
+        future.then(this, function (f) {
+            // Saved passwords are a provider of their own rather than another
+            // userData category: they are not files under /media/internal, they
+            // are one call to keymanager. Same in-process contract, so the
+            // engine needs no special case for either.
+            if (f.result === true || allProviders) {
+                allServices[credentials.SERVICE_ID] = {
                     preBackup:   "preBackup",
                     postRestore: "postRestore",
                     inProcess:   true

@@ -13,6 +13,7 @@
     { "source": "util/platform.js" },
     { "source": "util/system.js" },
     { "source": "util/prefs.js" },
+    { "source": "util/credentials.js" },
     { "source": "util/user-data.js" },
     { "source": "util/backup-service.js" },
 

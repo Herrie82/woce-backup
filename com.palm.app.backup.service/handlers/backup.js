@@ -23,7 +23,7 @@
 /*global Future, FILES_PATH, MANIFESTS_PATH, MANIFEST_ROOT, PalmCall, STAGE_ROOT,
   packageOpWrapperBudget, serviceCallTimeout, backup, dateUtil, eliminateDuplicates,
   fileUtil, isEmpty, isEmptyObject, logger, mapFuture, objectEquals, prefs,
-  privileged, require, system, targets, tolerate, userData, withDeadline,
+  credentials, privileged, require, system, targets, tolerate, userData, withDeadline,
   withTimeout, zeroPad */
 
 function BackupAssistant() {
@@ -230,6 +230,9 @@ function BackupAssistant() {
         if (descriptor && descriptor.inProcess) {
             if (serviceName === userData.SERVICE_ID) {
                 return userData[method](params);
+            }
+            if (serviceName === credentials.SERVICE_ID) {
+                return credentials[method](params);
             }
             throw new Error("No in-process provider for " + serviceName);
         }
@@ -938,9 +941,21 @@ function BackupAssistant() {
             try {
                 logger.log("Backup complete:", manifestName, manifest.size, "bytes,",
                     skipped.length, "skipped");
+
+                // Read before setPassphrase(null), which clears it. Same reason
+                // restore carries this: a keystore that would not export leaves
+                // a backup that looks complete and has no passwords in it, and
+                // the user only finds out at restore time, on a different
+                // device, when it is far too late to do anything about it.
+                var credentialsError = credentials.getLastError();
+                if (credentialsError) {
+                    logger.warn("Saved passwords were not backed up:", credentialsError);
+                }
+                credentials.setPassphrase(null);
                 backup.setStatusComplete({
                     manifestName: manifestName,
                     size:         manifest.size,
+                    credentialsError: credentialsError || undefined,
                     skipped:      skipped.length
                 });
                 f.result = {
@@ -948,6 +963,7 @@ function BackupAssistant() {
                     STATUS:       "Complete",
                     manifestName: manifestName,
                     size:         manifest.size,
+                    credentialsError: credentialsError || undefined,
                     skipped:      skipped
                 };
             } finally {
@@ -992,6 +1008,7 @@ function BackupAssistant() {
         cleanup.then(this, function (f) {
             var result = f.result;
 
+            credentials.setPassphrase(null);
             if (!backup.isCanceled()) {
                 backup.setStatusFailed(err.type, err.message);
             }
@@ -1006,6 +1023,12 @@ function BackupAssistant() {
         var full = args.full === true;
 
         logger.log("startBackup, type=" + (full ? "full" : "incremental"));
+
+        // Held for this run only, and never logged - see util/credentials.js.
+        // A run started without one (the scheduled daily backup, which has
+        // nobody to ask) simply skips the passwords category and says so in
+        // the manifest.
+        credentials.setPassphrase(args.passphrase);
 
         if (backup.isRunning()) {
             logger.log("A backup is already running");

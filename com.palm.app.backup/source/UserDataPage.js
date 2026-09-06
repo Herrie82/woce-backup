@@ -22,7 +22,8 @@ enyo.kind({
 
     // Must match the ids the service reports; a category it does not return is
     // hidden rather than shown empty.
-    CATEGORY_IDS: ["photos", "videos", "music", "documents", "downloads", "ringtones"],
+    CATEGORY_IDS: ["photos", "videos", "music", "documents", "downloads", "ringtones",
+                   "passwords"],
 
     events: {
         onDone: ""
@@ -110,6 +111,22 @@ enyo.kind({
                 { name: "emptyLabel", className: "list-empty", showing: false,
                   content: $L("No media found on this device.") },
 
+                { name: "credentialsGroup", kind: "RowGroup", caption: $L("Passwords"),
+                  showing: false, components: [
+                    { name: "row_passwords", kind: "Item", layoutKind: "HFlexLayout",
+                      align: "center", tapHighlight: false, showing: false, components: [
+                        { kind: "Control", flex: 1, components: [
+                            { name: "catLabel_passwords", className: "enyo-label" },
+                            { name: "detail_passwords", className: "category-detail" }
+                        ]},
+                        { name: "toggle_passwords", kind: "ToggleButton",
+                          categoryId: "passwords", onChange: "categoryToggled" }
+                    ]}
+                ]},
+
+                { name: "credentialsNote", className: "backup-info-text box", showing: false,
+                  content: $L("Your saved account passwords are encrypted with a passphrase you choose, so they can be restored onto a different device. You will be asked for it when a backup runs, and again when you restore. Forget it and the passwords simply will not restore - everything else still will.") },
+
                 { name: "totalLabel", className: "list-location", content: "" }
             ]}
         ]},
@@ -180,23 +197,33 @@ enyo.kind({
             }
 
             // A category with no files cannot be usefully enabled, so it is
-            // hidden rather than shown as a dead toggle.
-            var visible = category.count > 0;
+            // hidden rather than shown as a dead toggle - unless it says
+            // otherwise. Saved passwords have no file count to speak of and
+            // must be offered regardless.
+            var visible = category.always === true || category.count > 0;
             row.setShowing(visible);
             if (!visible) {
                 return;
             }
-            anyShown = true;
+            if (category.always !== true) {
+                anyShown = true;
+            }
 
             self.$["catLabel_" + id].setContent(category.label);
-            self.$["detail_" + id].setContent(enyo.macroize(
-                $L("{$count} files · {$size}"),
-                { count: category.count, size: self.formatSize(category.bytes) }));
+            self.$["detail_" + id].setContent(category.detail
+                ? category.detail
+                : enyo.macroize(
+                    $L("{$count} files · {$size}"),
+                    { count: category.count, size: self.formatSize(category.bytes) }));
             self.$["toggle_" + id].setState(category.enabled === true);
         });
 
         this.$.categoryGroup.setShowing(anyShown);
         this.$.emptyLabel.setShowing(!anyShown);
+
+        var hasCredentials = byId.passwords !== undefined;
+        this.$.credentialsGroup.setShowing(hasCredentials);
+        this.$.credentialsNote.setShowing(hasCredentials);
         this.updateTotal();
 
         this.populating = false;
@@ -209,6 +236,30 @@ enyo.kind({
 
         var id = inSender.categoryId;
         var enabled = inSender.getState();
+
+        /* Ignore a "change" that changes nothing.
+         *
+         * The `populating` flag above is not enough on its own. A row that was
+         * hidden renders when its group is first shown, and that render fires
+         * onChange on its own - after populate() has already dropped the flag,
+         * because the render is deferred. Measured on device: opening the What
+         * To Back Up page with the passwords row newly visible switched the
+         * category on without anyone touching it, and saved that to prefs.
+         *
+         * For a category that is meant to be off unless the user says
+         * otherwise, self-enabling is the worst possible failure. Comparing
+         * against what we already hold closes it whatever the render timing,
+         * which the flag alone cannot.
+         */
+        var current;
+        this.categories.forEach(function (category) {
+            if (category.id === id) {
+                current = category.enabled === true;
+            }
+        });
+        if (current === enabled) {
+            return;
+        }
 
         this.categories.forEach(function (category) {
             if (category.id === id) {
@@ -232,7 +283,9 @@ enyo.kind({
         var selectedBytes = 0;
         this.categories.forEach(function (category) {
             if (category.enabled) {
-                selectedBytes += category.bytes;
+                if (category.always !== true) {
+                    selectedBytes += category.bytes;
+                }
             }
         });
         this.$.totalLabel.setContent(selectedBytes === 0

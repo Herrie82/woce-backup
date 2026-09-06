@@ -14,6 +14,27 @@
  * exists.
  */
 
+/**
+ * True if a backup carries a saved-passwords section, so the restore flow knows
+ * to ask for the passphrase. The service id is the one credentials.js
+ * registers; a backup made before that existed simply does not have it.
+ */
+function backupHasCredentials(backup) {
+    var services = (backup && backup.services) || [];
+    var found = false;
+    services.forEach(function (service) {
+        // The section is present but empty when the category was on and the run
+        // had no passphrase to offer - a scheduled backup, say, which has nobody
+        // to ask. Requiring a file keeps us from demanding a passphrase to
+        // unlock nothing.
+        if (service.service === "com.palm.backup.credentials" &&
+                (service.files || []).length > 0) {
+            found = true;
+        }
+    });
+    return found;
+}
+
 enyo.kind({
     name: "ChooseBackupPage",
     kind: enyo.VFlexBox,
@@ -107,6 +128,7 @@ enyo.kind({
         this.inherited(arguments);
         this.rows = [];
         this.pendingRestore = null;
+        this.pendingHasCredentials = false;
     },
 
     loadingChanged: function () {
@@ -143,7 +165,8 @@ enyo.kind({
                     size:         backup.size,
                     type:         backup.type,
                     skipped:      backup.skipped,
-                    incompatible: backup.dbVersion >= self.inCompatibleVersion
+                    incompatible: backup.dbVersion >= self.inCompatibleVersion,
+                    hasCredentials: backupHasCredentials(backup)
                 });
             });
         });
@@ -219,6 +242,9 @@ enyo.kind({
         }
 
         this.pendingRestore = row.manifestName;
+        // Captured here rather than in confirmRestore, which only ever sees the
+        // manifest name.
+        this.pendingHasCredentials = row.hasCredentials === true;
         // confirmDialog is lazy: true, so confirmMessage does not exist until
         // openAtCenter's own prepareOpen() calls validateComponents() - too late
         // for a setContent() that runs before it. Same idiom as
@@ -235,7 +261,10 @@ enyo.kind({
         this.pendingRestore = null;
         this.$.confirmDialog.close();
         if (manifestName) {
-            this.doRestore({ manifestName: manifestName });
+            this.doRestore({
+                manifestName: manifestName,
+                hasCredentials: this.pendingHasCredentials === true
+            });
         }
     },
 
