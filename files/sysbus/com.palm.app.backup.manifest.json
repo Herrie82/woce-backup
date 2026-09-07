@@ -1,0 +1,21 @@
+{
+    "id": "com.palm.app.backup",
+    "version": "3.1.1",
+    "roleFiles": [
+        "/usr/share/luna-service2/roles.d/com.palm.app.backup.app.json",
+        "/usr/share/luna-service2/roles.d/com.palm.app.backup.service.role.json"
+    ],
+    "serviceFiles": [
+        "/usr/share/luna-service2/services.d/com.palm.app.backup.service.service"
+    ],
+    "apiPermissionFiles": [
+        "/usr/share/luna-service2/api-permissions.d/com.palm.app.backup.service.api.json"
+    ],
+    "clientPermissionFiles": [
+        "/usr/share/luna-service2/client-permissions.d/com.palm.app.backup.app.perm.json",
+        "/usr/share/luna-service2/client-permissions.d/com.palm.app.backup.service.perm.json"
+    ],
+    "groupsFiles": [
+        "/usr/share/luna-service2/groups.d/com.palm.app.backup.service.groups.json"
+    ]
+}

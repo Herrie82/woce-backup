@@ -1,0 +1,23 @@
+{
+    "backup-service.operation": [
+        "com.palm.app.backup.service/healthcheck",
+        "com.palm.app.backup.service/register",
+        "com.palm.app.backup.service/unregister",
+        "com.palm.app.backup.service/startBackup",
+        "com.palm.app.backup.service/cancelBackup",
+        "com.palm.app.backup.service/getBackupStatus",
+        "com.palm.app.backup.service/getLastBackupTime",
+        "com.palm.app.backup.service/optInToBackup",
+        "com.palm.app.backup.service/optOutOfBackup",
+        "com.palm.app.backup.service/restore",
+        "com.palm.app.backup.service/reboot",
+        "com.palm.app.backup.service/getRestoreDevices",
+        "com.palm.app.backup.service/listBackups",
+        "com.palm.app.backup.service/deleteBackup",
+        "com.palm.app.backup.service/listTargets",
+        "com.palm.app.backup.service/setTarget",
+        "com.palm.app.backup.service/getUserDataCategories",
+        "com.palm.app.backup.service/setUserDataCategories",
+        "com.palm.app.backup.service/scheduledBackup"
+    ]
+}

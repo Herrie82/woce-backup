@@ -1,0 +1,12 @@
+{
+    "com.palm.app.backup-*": [
+        "backup-service.operation",
+        "activity.operation",
+        "settings.query"
+    ],
+    "com.palm.app.backup": [
+        "backup-service.operation",
+        "activity.operation",
+        "settings.query"
+    ]
+}

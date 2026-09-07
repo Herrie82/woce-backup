@@ -1,0 +1,4 @@
+{
+ "allowedNames": ["com.palm.app.backup.service"],
+ "backup-service.operation": ["dev"]
+}

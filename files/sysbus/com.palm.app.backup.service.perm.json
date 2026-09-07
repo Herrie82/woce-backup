@@ -1,0 +1,30 @@
+{
+    "com.palm.app.backup.service": [
+        "backup-service.operation",
+        "database.management",
+        "database.operation",
+        "tempdatabase.operation",
+        "systemsettings.management",
+        "systemsettings.query",
+        "time.query",
+        "time.management",
+        "software.query",
+        "filecache.operation",
+        "filecache.management",
+        "activity.operation",
+        "activity.query",
+        "appmanager.management",
+        "preferences.systempropertyquery",
+        "preferences.applicationpropertyquery",
+        "preferences.operation",
+        "preferences.management",
+        "settings.query",
+        "application.operation",
+        "luna-sysmgr.operation",
+        "batteryd.management",
+        "networkconnection.query",
+        "accountsservice.operation",
+        "contactsservice.operation",
+        "keymanager-service.backup"
+    ]
+}

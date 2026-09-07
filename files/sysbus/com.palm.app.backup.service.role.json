@@ -1,0 +1,13 @@
+{
+    "appId": "com.palm.app.backup.service",
+    "allowedNames": ["com.palm.app.backup.service"],
+    "trustLevel": "oem",
+    "type": "regular",
+    "permissions": [
+        {
+            "service": "com.palm.app.backup.service",
+            "inbound": ["*"],
+            "outbound": ["*"]
+        }
+    ]
+}
