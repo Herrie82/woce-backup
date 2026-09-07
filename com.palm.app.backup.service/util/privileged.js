@@ -743,6 +743,64 @@ var privileged = (function () {
     /* One tarball per app, rooted at /media/cryptofs/apps so it unpacks back
      * over the same paths, carrying the app directory and opkg's record of it.
      */
+    /* Where an installer may still be sitting after an install.
+     *
+     * Reinstalling from the .ipk is better than unpacking the app directory:
+     * opkg runs the install itself, so its bookkeeping is rebuilt rather than
+     * reconstructed, and any maintainer script in the package runs as it did
+     * the first time. The directory tarball stays as the fallback, because a
+     * download is not guaranteed to still be there - and usually is not.
+     */
+    var IPK_SEARCH_DIRS = ["/media/internal/downloads/", APPS_ROOT + "/usr/palm/packages/"];
+
+    var escapeForRegExp = function (text) {
+        return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    };
+
+    /**
+     * A cached installer for exactly this package at exactly this version, or
+     * null.
+     *
+     * Two spellings. woce-backupd looks for "<id>.ipk", which is what its own
+     * archive step writes, so that name is honoured here too. What a download
+     * actually leaves behind is opkg's own "<id>_<version>_<arch>.ipk" - the
+     * daemon never matches those, so on a device where the user installed from
+     * the browser its .ipk path silently never fires.
+     *
+     * The version has to match. A backup records the version that is installed,
+     * and quietly reinstalling a different one from a stale download would be a
+     * worse outcome than unpacking the directory we know is correct.
+     */
+    var cachedIpkFor = function (id, version) {
+        var i, exact, names, pattern;
+
+        for (i = 0; i < IPK_SEARCH_DIRS.length; i++) {
+            exact = IPK_SEARCH_DIRS[i] + id + ".ipk";
+            if (statOrNull(exact)) {
+                return exact;
+            }
+        }
+        if (!version) {
+            return null;
+        }
+
+        pattern = new RegExp("^" + escapeForRegExp(id) + "_" +
+            escapeForRegExp(version) + "_[^_]*\\.ipk$");
+        for (i = 0; i < IPK_SEARCH_DIRS.length; i++) {
+            try {
+                names = fs.readdirSync(IPK_SEARCH_DIRS[i]);
+            } catch (err) {
+                names = [];
+            }
+            for (var n = 0; n < names.length; n++) {
+                if (pattern.test(names[n])) {
+                    return IPK_SEARCH_DIRS[i] + names[n];
+                }
+            }
+        }
+        return null;
+    };
+
     direct.archivePackages = function (packages, destDir) {
         var future = new Future();
         var archived = [];
@@ -772,6 +830,22 @@ var privileged = (function () {
             if (!statOrNull(APPS_DIR + id)) {
                 archiveFailures.push({ id: id, reason: "no installed directory" });
                 return next();
+            }
+
+            // Named <id>.ipk in the archive whatever it was called in the
+            // cache: restore rebuilds that name from the manifest to find it.
+            var cachedIpk = cachedIpkFor(id, pkg.version);
+            if (cachedIpk) {
+                try {
+                    mkdirsSync(destDir);
+                    copyFileSync(cachedIpk, path.join(destDir, id + ".ipk"));
+                    archived.push(id);
+                    return next();
+                } catch (copyErr) {
+                    // Not fatal - fall through and tar the directory instead.
+                    logger.warn("Could not take the cached installer for", id + ":",
+                        copyErr.message);
+                }
             }
 
             // opkg's status file is one shared file, so the package's own
@@ -1023,6 +1097,12 @@ var privileged = (function () {
         }
         return submit({ op: "reboot" }, 15000);
     };
+
+    /* Exported so the version-matching rule can be asserted directly: which
+     * installer is accepted for a package decides whether a restore reinstalls
+     * the version that was backed up or a stale one off the disk.
+     */
+    that.cachedIpkForTesting = cachedIpkFor;
 
     /* Exported so the policy above can be asserted directly.
      *

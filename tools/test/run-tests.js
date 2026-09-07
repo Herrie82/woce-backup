@@ -693,6 +693,70 @@ async function main() {
         (apps.result.romApps || []).indexOf("com.palm.app.email") !== -1,
         JSON.stringify(apps.result.romApps));
 
+    /* Archiving prefers a cached installer over the directory tarball.
+     *
+     * Reinstalling from the .ipk lets opkg rebuild its own bookkeeping instead
+     * of us reconstructing it, so it is worth looking for. woce-backupd looks
+     * only for "<id>.ipk"; what a browser download actually leaves in
+     * /media/internal/downloads is opkg's "<id>_<version>_<arch>.ipk", which
+     * that name never matches - so both spellings are accepted here, and the
+     * version has to match, since reinstalling a stale different version would
+     * be worse than unpacking the directory we know is right. */
+    section("Cached installers");
+
+    var DOWNLOADS = "/media/internal/downloads/";
+    var ipkFixture = { present: [], dirs: [] };
+    var ipkCtx = harness.loadService({
+        root: ROOT, services: services, quiet: !process.env.VERBOSE,
+        require: function (name) {
+            if (name === "child_process") {
+                return { exec: function (cmd, opts, cb) {
+                    var done = cb || opts;
+                    return setTimeout(function () { done(null, "", ""); }, 1);
+                } };
+            }
+            if (name === "fs") {
+                var realFs = require("fs");
+                var shim = Object.create(realFs);
+                shim.statSync = function (t) {
+                    if (ipkFixture.present.indexOf(t) !== -1) { return { isFile: function () { return true; } }; }
+                    if (String(t).indexOf(APPS) === 0) { return { isDirectory: function () { return true; } }; }
+                    return realFs.statSync(t);
+                };
+                shim.readdirSync = function (dir) {
+                    if (dir === DOWNLOADS) { return ipkFixture.dirs; }
+                    if (dir === APPS) { return ["com.example.app"]; }
+                    return realFs.readdirSync(dir);
+                };
+                return shim;
+            }
+            return require(name);
+        }
+    });
+    vm.runInContext("privileged.setDirectModeForTesting(true);", ipkCtx);
+
+    var findIpk = function (id, version, present, listing) {
+        ipkFixture.present = present || [];
+        ipkFixture.dirs = listing || [];
+        ipkCtx.__ipkArgs = { id: id, version: version };
+        vm.runInContext("__ipkFound = privileged.cachedIpkForTesting(__ipkArgs.id, __ipkArgs.version);", ipkCtx);
+        return ipkCtx.__ipkFound;
+    };
+
+    check("the daemon's <id>.ipk name is honoured",
+        findIpk("com.example.app", "1.0.0", [DOWNLOADS + "com.example.app.ipk"]) ===
+            DOWNLOADS + "com.example.app.ipk");
+    check("a browser download's <id>_<version>_<arch>.ipk is found too",
+        findIpk("com.example.app", "1.0.0", [], ["com.example.app_1.0.0_all.ipk"]) ===
+            DOWNLOADS + "com.example.app_1.0.0_all.ipk",
+        String(findIpk("com.example.app", "1.0.0", [], ["com.example.app_1.0.0_all.ipk"])));
+    check("a different version is refused rather than reinstalled",
+        findIpk("com.example.app", "1.0.0", [], ["com.example.app_2.5.0_all.ipk"]) === null);
+    check("another package with a similar name is not matched",
+        findIpk("com.example.app", "1.0.0", [], ["com.example.apples_1.0.0_all.ipk"]) === null);
+    check("nothing cached means nothing found, and the tarball path is used",
+        findIpk("com.example.app", "1.0.0", [], []) === null);
+
     /* The restore destination allowlist. A backup sits on /media/internal,
      * which is exported to a PC as USB mass storage, so the paths in its
      * manifest are untrusted input being handed to a process running as root. */
