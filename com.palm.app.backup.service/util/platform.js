@@ -93,6 +93,11 @@ var platform = (function () {
         return name === null ? null : "palm://" + name;
     };
 
+    /** True on the OSE bus (LuneOS), false on legacy webOS. */
+    that.isModernBus = function () {
+        return isModernBus;
+    };
+
     /** For the startup log: which set of names this device resolved to. */
     that.describe = function () {
         return isModernBus ? "OSE bus (com.webos.service.* names)"

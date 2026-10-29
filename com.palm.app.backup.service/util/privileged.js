@@ -16,13 +16,35 @@
  * a whole service's file list, so the poll interval does not dominate runtime.
  */
 /*global allocBuffer, Future, JOB_ROOT, WORK_ROOT, logger, packageOpBudget, pathExists, require,
-  setTimeout, fileUtil, isEmpty */
+  setTimeout, fileUtil, isEmpty, restorePolicy */
 
 var privileged = (function () {
     var that = {};
     var fs   = require('fs');
     var path = require('path');
-    var exec = require('child_process').exec;
+    var childProcess = require('child_process');
+
+    /* Every command this file runs, run as argv - never through a shell.
+     *
+     * Package ids and paths reach these commands from a backup manifest,
+     * which is attacker-controlled (it sits on USB-exported storage), and in
+     * direct mode we are uid 0. Single-quoting them into a shell string was
+     * one stray quote away from root command execution. execFile passes each
+     * argument to execve unchanged, so there is nothing to escape.
+     *
+     * Direct mode is LuneOS-only (an unjailed root process; see
+     * canActDirectly), where node is modern and execFile exists. The 3.0.5
+     * daemon path never comes through here.
+     */
+    var runArgv = function (file, args, options, callback) {
+        if (typeof childProcess.execFile !== "function") {
+            setTimeout(function () {
+                callback(new Error("child_process.execFile is not available"), "", "");
+            }, 0);
+            return;
+        }
+        childProcess.execFile(file, args, options, callback);
+    };
 
     /* The services a lunacall may target, on either bus. Same list the daemon
      * enforces, plus the OSE names for the ones that were renamed: this is a
@@ -114,14 +136,14 @@ var privileged = (function () {
 
     // Chunked rather than one readFileSync: a media file can be far larger than
     // the memory this device is willing to give us.
-    var copyFileSync = function (from, to) {
+    var copyFileSync = function (from, to, noFollow) {
         var CHUNK  = 65536;
         var buffer = allocBuffer(CHUNK);
         var input  = fs.openSync(from, "r");
         var output;
 
         try {
-            output = fs.openSync(to, "w");
+            output = noFollow ? openNoFollow(to) : fs.openSync(to, "w");
             try {
                 var position = 0;
                 while (true) {
@@ -195,71 +217,27 @@ var privileged = (function () {
      * partition could have a later restore write /usr, /lib or an ls2 role file
      * as root - turning "can write to the USB volume" into "owns the device".
      *
-     * These are woce-backupd's ALLOWED_WRITE_ROOTS and DENIED_WRITE_PREFIXES,
-     * deliberately unchanged. Direct mode does the same job the daemon does on
-     * webOS 3.0.5, against the same untrusted input, so the two must agree -
-     * a destination the daemon refuses and this accepts would be a hole that
-     * only opens on LuneOS, which is precisely where nobody would look for it.
+     * The policy itself lives in util/restore-policy.js, so that the engine's
+     * own direct writes (handlers/restore.js) and this unstage path apply the
+     * same one. Returns the normalised destination, or null.
      */
-    var ALLOWED_WRITE_ROOTS = [
-        "/media/internal/",
-        "/var/luna/",
-        "/var/palm/",
-        "/var/preferences/",
-        "/var/file-cache/",
-        "/tmp/"
-    ];
-
-    // Carved out of the above: an ls2 role file would let any caller register
-    // as any service on the bus.
-    var DENIED_WRITE_PREFIXES = [
-        "/var/palm/ls2/",
-        "/var/palm/jail/",
-        "/etc/",
-        "/usr/",
-        "/bin/",
-        "/sbin/",
-        "/lib/"
-    ];
-
     var isRestorableDest = function (dest) {
-        var raw = String(dest === undefined || dest === null ? "" : dest);
-        var normalized = path.normalize(raw);
-        var i;
+        var checked = restorePolicy.checkAbsolute(dest);
+        return checked.path || null;
+    };
 
-        // Absolute, and no traversal left after normalising. Checked before
-        // anything resolves it: path.resolve() interprets a relative path
-        // against the process's cwd, so "" becomes the cwd itself and could
-        // land inside an allowed root purely by where the service was started.
-        if (normalized.indexOf("..") !== -1 || normalized.charAt(0) !== "/") {
-            return null;
+    /* Opens a restore destination for writing without following a symlink
+     * at the final component, closing the gap between isRestorableDest's
+     * check and the write. fs.constants is modern node only; direct mode
+     * only runs there.
+     */
+    var openNoFollow = function (target) {
+        var c = fs.constants;
+        if (c && c.O_NOFOLLOW !== undefined) {
+            return fs.openSync(target,
+                c.O_WRONLY | c.O_CREAT | c.O_TRUNC | c.O_NOFOLLOW, parseInt("0644", 8));
         }
-
-        // Nearest existing ancestor through realpath, so a symlink planted at
-        // any level inside an allowed root cannot redirect the write out of it.
-        var resolved = normalized;
-        var probe = path.dirname(normalized);
-        while (probe.length > 1 && !statOrNull(probe)) {
-            probe = path.dirname(probe);
-        }
-        try {
-            resolved = path.normalize(path.join(fs.realpathSync(probe),
-                normalized.substring(probe.length)));
-        } catch (err) {
-            return null;
-        }
-
-        for (i = 0; i < DENIED_WRITE_PREFIXES.length; i++) {
-            if (resolved.indexOf(DENIED_WRITE_PREFIXES[i]) === 0) {
-                return null;
-            }
-        }
-        for (i = 0; i < ALLOWED_WRITE_ROOTS.length; i++) {
-            if (resolved.indexOf(ALLOWED_WRITE_ROOTS[i]) === 0) {
-                return resolved;
-            }
-        }
-        return null;
+        return fs.openSync(target, "w");
     };
 
     direct.unstage = function (files, stageDir) {
@@ -287,7 +265,13 @@ var privileged = (function () {
             }
             try {
                 mkdirsSync(path.dirname(dest));
-                copyFileSync(source, dest);
+                // Re-checked after mkdirs, which may have created parents,
+                // and opened O_NOFOLLOW: a symlink planted in between must
+                // not redirect a root write.
+                if (!isRestorableDest(dest)) {
+                    throw new Error("destination changed under us");
+                }
+                copyFileSync(source, dest, true);
                 restored.push(dest);
             } catch (err) {
                 logger.warn("unstage failed for", dest + ":", err.message);
@@ -355,12 +339,14 @@ var privileged = (function () {
             return future;
         }
 
-        var command = "luna-send -n 1 " +
-            ("luna://" + service + "/" + method).shellQuote() + " " + payload.shellQuote();
-
-        exec(command, { maxBuffer: 8 * 1024 * 1024 }, function (error, stdout) {
+        // argv, not a shell string. The payload can carry a backup
+        // passphrase (keymanager export/import), which is why the error below
+        // never repeats the command line: execFile's error.message does.
+        runArgv("luna-send", ["-n", "1", "luna://" + service + "/" + method, payload],
+            { maxBuffer: 8 * 1024 * 1024 }, function (error, stdout) {
             if (error) {
-                future.exception = new Error("luna-send failed: " + error.message);
+                future.exception = new Error("luna-send failed for " + service + "/" +
+                    method + " (exit " + (error.code === undefined ? "?" : error.code) + ")");
                 return;
             }
             var reply;
@@ -368,7 +354,7 @@ var privileged = (function () {
                 reply = JSON.parse(String(stdout));
             } catch (err2) {
                 future.exception = new Error(
-                    "Un-parseable reply from " + service + "/" + method + ": " + String(stdout));
+                    "Un-parseable reply from " + service + "/" + method);
                 return;
             }
             future.result = { reply: reply };
@@ -383,7 +369,7 @@ var privileged = (function () {
         // LuneOS the app is a card inside WebAppMgr that the reboot will take
         // with it.
         setTimeout(function () {
-            exec("reboot", function (error) {
+            runArgv("reboot", [], {}, function (error) {
                 if (error) {
                     logger.error("reboot failed:", error.message);
                 }
@@ -666,7 +652,7 @@ var privileged = (function () {
             logger.warn("Could not read", ROM_APPS_DIR + ":", err.message);
         }
 
-        exec("opkg -o " + APPS_ROOT + " list-installed", { timeout: 45000 },
+        runArgv("opkg", ["-o", APPS_ROOT, "list-installed"], { timeout: 45000 },
             function (error, stdout) {
                 var packages = [];
                 var known = {};
@@ -687,7 +673,7 @@ var privileged = (function () {
                         return;
                     }
                     var id = parts[0].replace(/^\s+|\s+$/g, "");
-                    if (isGeneratedStub(id)) {
+                    if (isGeneratedStub(id) || !restorePolicy.isValidPackageId(id)) {
                         return;
                     }
                     var info = readAppInfo(id);
@@ -712,7 +698,8 @@ var privileged = (function () {
                     appDirs = [];
                 }
                 appDirs.forEach(function (appId) {
-                    if (known[appId] || isGeneratedStub(appId)) {
+                    if (known[appId] || isGeneratedStub(appId) ||
+                            !restorePolicy.isValidPackageId(appId)) {
                         return;
                     }
                     var info = readAppInfo(appId);
@@ -827,6 +814,10 @@ var privileged = (function () {
             if (!id || isGeneratedStub(id)) {
                 return next();
             }
+            if (!restorePolicy.isValidPackageId(id)) {
+                archiveFailures.push({ id: String(id).substring(0, 128), reason: "bad package id" });
+                return next();
+            }
             if (!statOrNull(APPS_DIR + id)) {
                 archiveFailures.push({ id: id, reason: "no installed directory" });
                 return next();
@@ -873,7 +864,7 @@ var privileged = (function () {
             // the same. The daemon's naming is the contract.
             var target = path.join(destDir, id + "-app.tar.gz");
             mkdirsSync(destDir);
-            exec("tar czf '" + target + "' -C " + APPS_ROOT + " " + members.join(" "),
+            runArgv("tar", ["czf", target, "-C", APPS_ROOT].concat(members),
                 { timeout: 300000, maxBuffer: 1024 * 1024 },
                 function (error) {
                     try {
@@ -907,9 +898,40 @@ var privileged = (function () {
         }
         var blocks = text.split(/\n\s*\n/);
         for (var i = 0; i < blocks.length; i++) {
-            if (new RegExp("^Package:\\s*" + id + "\\s*$", "m").test(blocks[i])) {
+            if (new RegExp("^Package:\\s*" + escapeForRegExp(id) + "\\s*$", "m").test(blocks[i])) {
                 return blocks[i].replace(/\s+$/, "") + "\n";
             }
+        }
+        return null;
+    };
+
+    /* Why a package job entry may not be acted on, or null.
+     *
+     * The id is checked as a plain package id, and the file has to be exactly
+     * <WORK_ROOT>...<id><suffix>: normalised, no '..', inside our own work
+     * area, a regular file and not a symlink. restore.js builds these paths
+     * itself from a validated id, so anything else is not one of ours.
+     */
+    var refusePackageEntry = function (entry, suffix) {
+        if (!entry || !restorePolicy.isValidPackageId(entry.id)) {
+            return "bad package id";
+        }
+        var p = String(entry.path || "");
+        if (p.indexOf("\u0000") !== -1 || path.normalize(p) !== p ||
+                p.split("/").indexOf("..") !== -1 || p.indexOf(WORK_ROOT) !== 0) {
+            return "outside the work area";
+        }
+        if (path.basename(p) !== entry.id + suffix) {
+            return "file name does not match the id";
+        }
+        var st;
+        try {
+            st = fs.lstatSync(p);
+        } catch (err) {
+            return "missing";
+        }
+        if (!st.isFile()) {
+            return "not a regular file";
         }
         return null;
     };
@@ -929,12 +951,13 @@ var privileged = (function () {
             // Same bound the daemon puts on this op: an installer runs
             // arbitrary maintainer scripts as root, so it may only ever come
             // from our own work area, never from a path a manifest names.
-            if (!entry || !entry.path || String(entry.path).indexOf(WORK_ROOT) !== 0) {
-                logger.warn("Refusing to install from outside the work area:", entry && entry.path);
-                failed.push((entry && entry.id) || "(unknown)");
+            var refused = refusePackageEntry(entry, ".ipk");
+            if (refused) {
+                logger.warn("Refusing to install", JSON.stringify(String(entry && entry.path)) + ":", refused);
+                failed.push(restorePolicy.isValidPackageId(entry && entry.id) ? entry.id : "(invalid)");
                 return next();
             }
-            exec("opkg -o " + APPS_ROOT + " --force-reinstall install '" + entry.path + "'",
+            runArgv("opkg", ["-o", APPS_ROOT, "--force-reinstall", "install", entry.path],
                 { timeout: 300000, maxBuffer: 1024 * 1024 },
                 function (error) {
                     if (error) {
@@ -955,6 +978,91 @@ var privileged = (function () {
      * folds its opkg stanza into the status file, so the app returns installed
      * rather than merely present.
      */
+    /* What an app-directory tarball may contain: exactly what archivePackages
+     * puts in one, for this id and no other.
+     */
+    var memberAllowed = function (name, id) {
+        var n = String(name).replace(/^\.\//, "").replace(/\/$/, "");
+        if (n.length === 0 || n.charAt(0) === "/" || n.indexOf("\\") !== -1 ||
+                n.split("/").indexOf("..") !== -1) {
+            return false;
+        }
+        var appDir = "usr/palm/applications/" + id;
+        return n === appDir || n.indexOf(appDir + "/") === 0 ||
+            n === "usr" || n === "usr/palm" || n === "usr/palm/applications" ||
+            n === "var" || n === "var/lib" || n === "var/lib/opkg" || n === "var/lib/opkg/info" ||
+            n === "var/lib/opkg/info/" + id + ".control" ||
+            n === "var/lib/opkg/info/" + id + ".list" ||
+            n === STATUS_MEMBER;
+    };
+
+    /* One line of GNU `tar -tvzf --quoting-style=escape`:
+     *   -rw-r--r-- user/group  123 2026-01-01 12:00 name
+     *   lrwxrwxrwx user/group    0 2026-01-01 12:00 name -> target
+     *   hrw-r--r-- user/group    0 2026-01-01 12:00 name link to target
+     * Returns { type, name, link } or null for a line it cannot read.
+     */
+    var parseTarLine = function (line) {
+        var m = /^(.)\S*\s+\S+\s+\d+(?:,\s*\d+)?\s+\d{4}-\d\d-\d\d\s+\d\d:\d\d(?::\d\d)?\s+(.+)$/.exec(line);
+        if (!m) {
+            return null;
+        }
+        var rest = m[2];
+        var entry = { type: m[1], name: rest, link: null };
+        var sep = m[1] === "l" ? " -> " : (m[1] === "h" ? " link to " : null);
+        if (sep) {
+            var parts = rest.split(sep);
+            if (parts.length !== 2) {
+                return null;
+            }
+            entry.name = parts[0];
+            entry.link = parts[1];
+        }
+        return entry;
+    };
+
+    /**
+     * Why this tarball may not be unpacked over /media/cryptofs/apps as root,
+     * or null. Every member must sit inside this app's own directory or be
+     * one of its two opkg info files or our status stanza; only files,
+     * directories and links are allowed; a symlink must be relative and stay
+     * inside the app directory, a hard link must name an allowed member.
+     */
+    var checkTarListing = function (listing, id) {
+        var lines = String(listing || "").split("\n");
+        var count = 0;
+        for (var i = 0; i < lines.length; i++) {
+            if (lines[i].length === 0) {
+                continue;
+            }
+            var entry = parseTarLine(lines[i]);
+            if (!entry) {
+                return "unreadable listing line";
+            }
+            count++;
+            if (!memberAllowed(entry.name, id)) {
+                return "member outside the app: " + entry.name.substring(0, 200);
+            }
+            if (entry.type === "l") {
+                var target = String(entry.link);
+                var base = path.dirname(entry.name.replace(/^\.\//, ""));
+                var joined = path.normalize(base + "/" + target);
+                if (target.charAt(0) === "/" || target.indexOf("\\") !== -1 ||
+                        target.split("/").indexOf("..") !== -1 ||
+                        joined.indexOf("usr/palm/applications/" + id + "/") !== 0) {
+                    return "symlink leaving the app: " + entry.name.substring(0, 200);
+                }
+            } else if (entry.type === "h") {
+                if (!memberAllowed(entry.link, id)) {
+                    return "hard link outside the app: " + entry.name.substring(0, 200);
+                }
+            } else if (entry.type !== "-" && entry.type !== "d") {
+                return "special file: " + entry.name.substring(0, 200);
+            }
+        }
+        return count > 0 ? null : "empty archive";
+    };
+
     direct.restoreAppDirectories = function (files) {
         var future = new Future();
         var restored = [];
@@ -976,6 +1084,16 @@ var privileged = (function () {
             // Replaced, not appended, if opkg already has a record: two stanzas
             // for one package is a corrupt status file.
             if (stanzaFor(id)) {
+                return;
+            }
+            // It came out of the backup, so it must be one stanza and for
+            // this package: otherwise a crafted archive could rewrite what
+            // opkg believes about any other package.
+            var packages = stanza.match(/^Package:.*$/mg) || [];
+            if (packages.length !== 1 ||
+                    !new RegExp("^Package:\\s*" + escapeForRegExp(id) + "\\s*$").test(packages[0]) ||
+                    /\n\s*\n\S/.test(stanza)) {
+                logger.warn("Ignoring an opkg stanza that is not for", id);
                 return;
             }
             try {
@@ -1000,24 +1118,44 @@ var privileged = (function () {
                 return;
             }
             var entry = queue.shift();
-            if (!entry || !entry.path || String(entry.path).indexOf(WORK_ROOT) !== 0) {
-                logger.warn("Refusing to unpack from outside the work area:", entry && entry.path);
-                failed.push((entry && entry.id) || "(unknown)");
+            var refused = refusePackageEntry(entry, "-app.tar.gz");
+            if (refused) {
+                logger.warn("Refusing to unpack", JSON.stringify(String(entry && entry.path)) + ":", refused);
+                failed.push(restorePolicy.isValidPackageId(entry && entry.id) ? entry.id : "(invalid)");
                 return next();
             }
-            mkdirsSync(APPS_DIR);
-            mkdirsSync(OPKG_INFO);
-            exec("tar xzf '" + entry.path + "' -C " + APPS_ROOT,
-                { timeout: 300000, maxBuffer: 1024 * 1024 },
-                function (error) {
-                    if (error) {
-                        logger.warn("Could not unpack", entry.id + ":", error.message);
+            // List first, unpack only if every member belongs to this app.
+            // GNU tar already refuses '..' members, but not a member for
+            // another app's directory, a symlink out of the tree followed by
+            // a write through it, or a device node.
+            runArgv("tar", ["-tvzf", entry.path, "--quoting-style=escape"],
+                { timeout: 300000, maxBuffer: 16 * 1024 * 1024 },
+                function (listError, listing) {
+                    var bad = listError ? "cannot list: exit " + listError.code
+                        : checkTarListing(listing, entry.id);
+                    if (bad) {
+                        logger.warn("Refusing to unpack", entry.id + ":", bad);
                         failed.push(entry.id);
-                    } else {
-                        mergeStanza(entry.id);
-                        restored.push(entry.id);
+                        return next();
                     }
-                    next();
+                    mkdirsSync(APPS_DIR);
+                    mkdirsSync(OPKG_INFO);
+                    // Ownership and modes from the archive are not ours to
+                    // keep: as root, tar would otherwise restore setuid bits
+                    // and arbitrary owners.
+                    runArgv("tar", ["-xzf", entry.path, "-C", APPS_ROOT,
+                            "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir"],
+                        { timeout: 300000, maxBuffer: 1024 * 1024 },
+                        function (error) {
+                            if (error) {
+                                logger.warn("Could not unpack", entry.id + ": exit", error.code);
+                                failed.push(entry.id);
+                            } else {
+                                mergeStanza(entry.id);
+                                restored.push(entry.id);
+                            }
+                            next();
+                        });
                 });
         };
 
@@ -1110,7 +1248,13 @@ var privileged = (function () {
      * worth being able to check without having to be root with a staged file
      * on disk to do it.
      */
+    /** True once probed and running the privileged work in-process. */
+    that.isDirect = function () {
+        return directMode === true;
+    };
+
     that.isRestorableDest = isRestorableDest;
+    that.checkTarListingForTesting = checkTarListing;
 
     /**
      * Test seam: forces direct mode on, so the inline implementations can be
