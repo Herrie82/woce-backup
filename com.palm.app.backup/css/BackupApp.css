@@ -15,6 +15,7 @@
 .box-center {
 	width: 500px;
 	max-width: 100%;
+	box-sizing: border-box; /* padding (e.g. .restore .subtitle) stays inside the 100% */
 	margin: 23px auto 0;
 }
 
