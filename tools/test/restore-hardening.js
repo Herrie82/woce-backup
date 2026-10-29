@@ -131,6 +131,8 @@ module.exports = async function (t) {
         check("a relative name through a symlink in the temp dir is refused",
             !rel("evil/shadow").path, JSON.stringify(rel("evil/shadow")));
         call(ctx, "restorePolicy.setRootsForTesting(null)");
+        // The temp dir is emptied between services; leave it as it was.
+        fs.unlinkSync(path.join(TEMP, "evil"));
     } else {
         check("symlink tests skipped: this host cannot create symlinks", true);
     }
@@ -234,6 +236,35 @@ module.exports = async function (t) {
         postRestoreArgs.length === 1 && JSON.stringify(postRestoreArgs[0]) ===
             JSON.stringify([goodFile.path]),
         JSON.stringify(postRestoreArgs));
+
+    // Unjailed and root (LuneOS direct mode): an absolute destination is
+    // never written by the engine itself, which would follow a symlink
+    // planted after the policy looked, but handed to unstage, which re-checks
+    // it and opens it O_NOFOLLOW.
+    var DIRECT_DEST = "/media/internal/woce-backup-test-" + process.pid + ".txt";
+    var directManifest = JSON.parse(JSON.stringify(base));
+    directManifest.services.filter(function (s) {
+        return s.service === "com.example.settings";
+    })[0].files = [goodFile, clone({ path: DIRECT_DEST })];
+    var DIRECT_CRAFTED = "000092-abc123";
+    fs.writeFileSync(path.join(t.manifestDir(), DIRECT_CRAFTED), JSON.stringify(directManifest));
+    var directCtx = newCtx();
+    vm.runInContext("privileged.setDirectModeForTesting(true);" +
+        "privileged.listInstalledApps = function () {" +
+        "  return new Future({ returnValue: true, packages: [], romApps: [] }); };", directCtx);
+    directCtx.__unstaged = [];
+    vm.runInContext("privileged.setUnstageForTesting(function (files) {" +
+        "  files.forEach(function (f) { __unstaged.push(f.path); });" +
+        "  return new Future({ restored: files.map(function (f) { return f.path; }), skipped: [] }); });",
+        directCtx);
+    var directRun = await t.run(directCtx, "RestoreAssistant", { manifestName: DIRECT_CRAFTED }, []);
+    check("in direct mode an absolute destination goes through unstage",
+        !directRun.error && JSON.stringify(directCtx.__unstaged) === JSON.stringify([DIRECT_DEST]),
+        directRun.error ? directRun.error.message : JSON.stringify(directCtx.__unstaged));
+    check("while a relative one is still written into the temp dir",
+        directCtx.__busLog.filter(function (c) {
+            return c.service === "com.example.settings" && c.method === "postRestore";
+        }).length === 1);
 
     /* ------------------------------------------------ packages */
     t.section("Restore of crafted package ids");
