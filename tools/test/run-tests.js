@@ -42,7 +42,9 @@ function section(name) {
 function rmrf(target) {
     var stat;
     try {
-        stat = fs.statSync(target);
+        // lstat: never follow a symlink out of the sandbox (the restore
+        // hardening tests plant some), and remove a dangling one too.
+        stat = fs.lstatSync(target);
     } catch (err) {
         return;
     }
@@ -644,9 +646,10 @@ async function main() {
         quiet: !process.env.VERBOSE,
         require: function (name) {
             if (name === "child_process") {
-                return { exec: function (cmd, opts, cb) {
+                // execFile: privileged.js runs every command as argv now.
+                return { execFile: function (file, args, opts, cb) {
                     var done = cb || opts;
-                    if (String(cmd).indexOf("list-installed") !== -1) {
+                    if (args.indexOf("list-installed") !== -1) {
                         return setTimeout(function () { done(null, appFixture.opkg, ""); }, 1);
                     }
                     return setTimeout(function () { done(null, "", ""); }, 1);
@@ -720,7 +723,7 @@ async function main() {
         root: ROOT, services: services, quiet: !process.env.VERBOSE,
         require: function (name) {
             if (name === "child_process") {
-                return { exec: function (cmd, opts, cb) {
+                return { execFile: function (file, args, opts, cb) {
                     var done = cb || opts;
                     return setTimeout(function () { done(null, "", ""); }, 1);
                 } };
@@ -1140,6 +1143,21 @@ async function main() {
         "  ], romApps: ['com.palm.somesystemapp'] });" +
         "};", pkgCtx);
 
+    // restoreUserApps defaults off: reinstalling runs opkg maintainer scripts
+    // (or unpacks a tree) as root from an unauthenticated backup, so a restore
+    // that was not asked to bring apps back must not touch any.
+    var noAppsRestore = await run(pkgCtx, "RestoreAssistant",
+        { manifestName: pkgBackup.result.manifestName }, []);
+    check("with restoreUserApps off, the restore still completes",
+        !noAppsRestore.error && noAppsRestore.result &&
+            noAppsRestore.result.STATUS === "Complete" &&
+            noAppsRestore.result.appsRestored === false,
+        noAppsRestore.error ? noAppsRestore.error.message : JSON.stringify(noAppsRestore.result));
+    check("and no package is installed or unpacked",
+        pkgCtx.__installCalls.length === 0 && pkgCtx.__restoreDirCalls.length === 0,
+        JSON.stringify([pkgCtx.__installCalls, pkgCtx.__restoreDirCalls]));
+
+    vm.runInContext("prefs.set({ restoreUserApps: true });", pkgCtx);
     var pkgRestore = await run(pkgCtx, "RestoreAssistant",
         { manifestName: pkgBackup.result.manifestName }, []);
     check("restore completes",
@@ -1188,9 +1206,18 @@ async function main() {
     // different answers to "why is my app missing".
     var receiptDir = path.join(ROOT, "backups", "receipts");
     // Several restores run in this suite, each leaving its own receipt, so pick
-    // the one for THIS manifest's first restore rather than whatever sorts first.
-    var wantReceipt = pkgBackup.result.manifestName + "-restore-01.json";
+    // the one for THIS manifest's second restore rather than whatever sorts
+    // first. The first is the restoreUserApps-off run above.
+    var wantReceipt = pkgBackup.result.manifestName + "-restore-02.json";
     var receipts = fs.existsSync(receiptDir) ? fs.readdirSync(receiptDir) : [];
+    var offReceiptName = pkgBackup.result.manifestName + "-restore-01.json";
+    var offReceipt = receipts.indexOf(offReceiptName) !== -1
+        ? JSON.parse(fs.readFileSync(path.join(receiptDir, offReceiptName), "utf8")) : null;
+    check("with restoreUserApps off, the receipt says the apps were not requested",
+        offReceipt && offReceipt.packages.filter(function (p) {
+            return p.id === "com.example.appone";
+        })[0].outcome === "not-requested",
+        JSON.stringify(offReceipt && offReceipt.summary));
     check("a restore writes a receipt named for the manifest and attempt",
         receipts.indexOf(wantReceipt) !== -1, JSON.stringify(receipts));
     if (receipts.indexOf(wantReceipt) !== -1) {
@@ -1706,6 +1733,13 @@ async function main() {
             vm.runInContext("(function(){var b = allocBuffer(7);" +
                 "return (typeof b.length === 'number' ? b.length : -1);}())", vintageCtx) === 7);
     }
+
+    /* ---- crafted manifests, argv execution, log redaction ---- */
+    await require("./restore-hardening")({
+        harness: harness, check: check, section: section, run: run,
+        buildServices: buildServices, ROOT: ROOT, mkdirs: mkdirs, rmrf: rmrf,
+        manifestDir: manifestDir
+    });
 
     /* ---- summary ---- */
     console.log("\n" + passed + " passed, " + failed + " failed");
