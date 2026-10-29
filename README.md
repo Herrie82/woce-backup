@@ -69,6 +69,13 @@ Everything the stock backup did, because it asks the same services:
   QuickOffice that every image already ships. Asking the image what it provides
   is the actual question.
 
+  **Reinstalling apps on restore is off by default.** Putting an app back runs
+  its package scripts, or unpacks its files, as root, from a backup that
+  anyone with the USB storage could have edited. It happens only when the
+  `restoreUserApps` setting is on or the restore call passes
+  `restoreUserApps: true`; otherwise the restore reports the apps as not
+  requested and leaves them to be reinstalled from their source.
+
   Going the other way, `ipkg` is not the only thing that makes an app real: the
   directory fallback below puts an app back *without* re-creating ipkg's
   bookkeeping, so anything with an `appinfo.json` in the cryptofs app directory
@@ -139,6 +146,13 @@ So woce-backup compresses but does not encrypt. A backup is restorable after a
 Doctor, and onto different hardware. It also means **anyone with access to the
 device's USB storage can read your accounts and settings**. If that matters for
 your threat model, copy the backup somewhere safe and delete it from the device.
+
+The same applies to writing one: nothing authenticates a backup, so a restore
+treats its manifest as untrusted input. Every path, stored-file name and
+package id in it is checked before use (`util/restore-policy.js`), and an
+entry that climbs out of its directory, names a destination outside the
+permitted roots, or runs through a symlink is skipped and reported rather than
+restored.
 
 ---
 
