@@ -114,6 +114,9 @@ module.exports = async function (t) {
         fs.symlinkSync(OUTSIDE, path.join(SYMROOT, "link"));
         fs.symlinkSync(path.join(OUTSIDE, "target.txt"), path.join(SYMROOT, "real", "final"));
         fs.symlinkSync(OUTSIDE, path.join(TEMP, "evil"));
+        // A link that stays inside the root: resolving it does not leave the
+        // root, so only the no-symlinks-in-the-path rule catches it.
+        fs.symlinkSync(path.join(SYMROOT, "real"), path.join(SYMROOT, "inner"));
     } catch (err) {
         symlinksWork = false;
     }
@@ -126,6 +129,8 @@ module.exports = async function (t) {
             !abs(SYMROOT + "/link/shadow").path, JSON.stringify(abs(SYMROOT + "/link/shadow")));
         check("a deeper path through a symlinked parent is refused",
             !abs(SYMROOT + "/link/a/b/c").path);
+        check("a symlink that stays inside the root is refused too",
+            !abs(SYMROOT + "/inner/new.txt").path, JSON.stringify(abs(SYMROOT + "/inner/new.txt")));
         check("a symlink at the destination itself is refused",
             !abs(SYMROOT + "/real/final").path);
         check("a relative name through a symlink in the temp dir is refused",
@@ -325,6 +330,13 @@ module.exports = async function (t) {
 
     var execCalls = [];
     var fakeChild = {
+        // Recorded rather than missing, so a regression to a shell string
+        // fails the argv check instead of crashing the suite.
+        exec: function (cmd, opts, cb) {
+            execCalls.push({ shell: cmd });
+            var done = cb || opts;
+            setTimeout(function () { done(null, "", ""); }, 1);
+        },
         execFile: function (file, args, opts, cb) {
             execCalls.push({ file: file, args: args });
             var done = cb || opts;
@@ -389,6 +401,15 @@ module.exports = async function (t) {
     check("a symlink out of the app is refused",
         listing(good.concat(["lrwxrwxrwx root/root 0 2026-01-01 12:00 usr/palm/applications/com.example.app/x -> /etc"])) !== null &&
         listing(good.concat(["lrwxrwxrwx root/root 0 2026-01-01 12:00 usr/palm/applications/com.example.app/x -> ../../../../etc"])) !== null);
+    var own = function (stanza) {
+        return call(argvCtx, "privileged.isOwnStanzaForTesting(__args, 'com.example.app')", stanza);
+    };
+    check("the archive's own opkg stanza is accepted",
+        own("Package: com.example.app\nVersion: 1.0\nStatus: install ok installed\n") === true);
+    check("an opkg stanza for another package is refused",
+        own("Package: busybox\nVersion: 9.9\n") === false);
+    check("an opkg stanza that smuggles a second package is refused",
+        own("Package: com.example.app\nVersion: 1.0\n\nPackage: busybox\nVersion: 9.9\n") === false);
     check("a hard link to a file outside is refused",
         listing(good.concat(["hrw-r--r-- root/root 0 2026-01-01 12:00 usr/palm/applications/com.example.app/x link to etc/shadow"])) !== null);
     check("a device node is refused",
@@ -449,6 +470,12 @@ module.exports = async function (t) {
         console: { log: function (line) { lines.push(String(line)); },
                    error: function (line) { lines.push(String(line)); } }
     });
+    // What system.js hands the logger, before the logger's own redaction:
+    // the call line has to be clean at the source too.
+    logCtx.__rawLines = [];
+    vm.runInContext("(function () { var real = logger.log;" +
+        "logger.log = function () { __rawLines.push(JSON.stringify(Array.prototype.slice.call(arguments)));" +
+        "  return real.apply(logger, arguments); }; }());", logCtx);
     logCtx.__secret = SECRET;
     logCtx.__ks = KEYSTORE_SECRET;
     var exp = await settle(call(logCtx,
@@ -462,6 +489,10 @@ module.exports = async function (t) {
     check("the passphrase is not in the log", logged.indexOf(SECRET) === -1,
         logged.split("\n").filter(function (l) { return l.indexOf(SECRET) !== -1; })[0]);
     check("the keystore is not in the log", logged.indexOf(KEYSTORE_SECRET) === -1);
+    check("system.palmcall redacts its call line itself, not only via the logger",
+        logCtx.__rawLines.join("\n").indexOf(SECRET) === -1 &&
+            logCtx.__rawLines.join("\n").indexOf(KEYSTORE_SECRET) === -1,
+        logCtx.__rawLines.filter(function (l) { return l.indexOf(SECRET) !== -1; })[0]);
     check("the error handed back does not carry the passphrase either",
         exp.error && String(exp.error.message).indexOf(SECRET) === -1 &&
             /exportKeystore/.test(exp.error.message),
