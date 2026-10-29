@@ -1063,6 +1063,18 @@ var privileged = (function () {
         return count > 0 ? null : "empty archive";
     };
 
+    /* An opkg status stanza out of a backup archive: it must be exactly one
+     * stanza, and for this package. Otherwise a crafted archive could rewrite
+     * what opkg believes about any other package.
+     */
+    var isOwnStanza = function (stanza, id) {
+        var text = String(stanza);
+        var packages = text.match(/^Package:.*$/mg) || [];
+        return packages.length === 1 &&
+            new RegExp("^Package:\\s*" + escapeForRegExp(id) + "\\s*$").test(packages[0]) &&
+            !/\n\s*\n\S/.test(text);
+    };
+
     direct.restoreAppDirectories = function (files) {
         var future = new Future();
         var restored = [];
@@ -1086,13 +1098,7 @@ var privileged = (function () {
             if (stanzaFor(id)) {
                 return;
             }
-            // It came out of the backup, so it must be one stanza and for
-            // this package: otherwise a crafted archive could rewrite what
-            // opkg believes about any other package.
-            var packages = stanza.match(/^Package:.*$/mg) || [];
-            if (packages.length !== 1 ||
-                    !new RegExp("^Package:\\s*" + escapeForRegExp(id) + "\\s*$").test(packages[0]) ||
-                    /\n\s*\n\S/.test(stanza)) {
+            if (!isOwnStanza(stanza, id)) {
                 logger.warn("Ignoring an opkg stanza that is not for", id);
                 return;
             }
@@ -1255,6 +1261,7 @@ var privileged = (function () {
 
     that.isRestorableDest = isRestorableDest;
     that.checkTarListingForTesting = checkTarListing;
+    that.isOwnStanzaForTesting = isOwnStanza;
 
     /**
      * Test seam: forces direct mode on, so the inline implementations can be
