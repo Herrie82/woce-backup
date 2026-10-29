@@ -127,6 +127,18 @@
                     "public": true
                 },
                 {
+                    "name": "getRestoreOptions",
+                    "assistant": "GetRestoreOptionsAssistant",
+                    "description": "Returns the restore options, today whether a restore reinstalls apps",
+                    "public": true
+                },
+                {
+                    "name": "setRestoreOptions",
+                    "assistant": "SetRestoreOptionsAssistant",
+                    "description": "Sets whether a restore reinstalls the apps in the backup's package list",
+                    "public": true
+                },
+                {
                     "name": "scheduledBackup",
                     "assistant": "ScheduledBackupAssistant",
                     "description": "Activity Manager callback for the daily scheduled backup",

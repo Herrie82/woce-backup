@@ -15,6 +15,12 @@ label_info_destination = $L("Back up to");
 label_info_manage      = $L("Manage backups");
 label_info_whatToBackUp = $L("What to back up");
 label_backup = $L("Backup");
+
+// Off by default: reinstalling an app runs its install scripts with full
+// system rights, from a backup that nothing authenticates. The service keeps
+// the setting (restoreUserApps) and restore.js reads it from there.
+label_info_restoreApps     = $L("Reinstall apps when restoring");
+label_info_restoreAppsNote = $L("Apps are reinstalled from the package list saved in the backup, and their install scripts run with full system rights. Leave this off unless you trust where the backup came from.");
 label_on  = $L("ON");
 label_off = $L("OFF");
 
@@ -39,7 +45,8 @@ enyo.kind({
         onOptIn: "",
         onShowTargets: "",
         onShowBackups: "",
-        onShowUserData: ""
+        onShowUserData: "",
+        onRestoreAppsChange: ""
     },
 
     published: {
@@ -88,6 +95,18 @@ enyo.kind({
                 { flex: 1, content: label_info_manage, className: "enyo-label" },
                 { name: "manageLabel", className: "info-text", content: "" }
             ]}
+        ]},
+
+        { name: "restoreGroup", kind: "RowGroup", components: [
+            { layoutKind: "HFlexLayout", align: "center", components: [
+                { flex: 1, content: label_info_restoreApps, className: "enyo-label" },
+                { kind: "ToggleButton", name: "restoreAppsButton", state: false,
+                  onLabel: label_on, offLabel: label_off, onChange: "restoreAppsChanged" }
+            ]}
+        ]},
+        { kind: "VFlexBox", className: "box-center box", components: [
+            { name: "restoreAppsNote", className: "backup-info-text",
+              content: label_info_restoreAppsNote }
         ]},
 
         { kind: "RowGroup", name: "lastBackup", showing: false, components: [
@@ -208,5 +227,23 @@ enyo.kind({
 
     userDataClick: function () {
         this.doShowUserData();
+    },
+
+    restoreAppsChanged: function (inSender) {
+        this.doRestoreAppsChange(inSender.getState() === true);
+    },
+
+    // Programmatic, like setState: it reflects what the service stored and
+    // does not fire restoreAppsChanged.
+    setRestoreApps: function (state) {
+        this.$.restoreAppsButton.setState(state === true);
+    },
+
+    getRestoreApps: function () {
+        return this.$.restoreAppsButton.getState() === true;
+    },
+
+    setRestoreAppsDisabled: function (disabled) {
+        this.$.restoreAppsButton.setDisabled(disabled === true);
     }
 });

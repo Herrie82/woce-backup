@@ -72,9 +72,11 @@ Everything the stock backup did, because it asks the same services:
   **Reinstalling apps on restore is off by default.** Putting an app back runs
   its package scripts, or unpacks its files, as root, from a backup that
   anyone with the USB storage could have edited. It happens only when the
-  `restoreUserApps` setting is on or the restore call passes
-  `restoreUserApps: true`; otherwise the restore reports the apps as not
-  requested and leaves them to be reinstalled from their source.
+  **Reinstall apps when restoring** switch on the app's main panel is on (the
+  `restoreUserApps` setting, kept by the service and changed with
+  `setRestoreOptions`) or the restore call passes `restoreUserApps: true`;
+  otherwise the restore reports the apps as not requested and leaves them to
+  be reinstalled from their source.
 
   Going the other way, `ipkg` is not the only thing that makes an app real: the
   directory fallback below puts an app back *without* re-creating ipkg's

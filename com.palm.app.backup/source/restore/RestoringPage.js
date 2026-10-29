@@ -301,7 +301,7 @@ enyo.kind({
 
         this.$.statusLabel.setContent("");
         this.$.doneMessage.setContent(messages.join(" "));
-        this.buildManualInstallRows(needsManual);
+        this.buildManualInstallRows(needsManual, inResponse.appsRestored === false);
         // Hide the progress display rather than leaving it showing alongside
         // donePanel: both are flex: 1, so with both visible they split the
         // screen and donePanel's own Toolbar ends up pinned to the bottom of
@@ -346,7 +346,7 @@ enyo.kind({
      * AppCatalogWindow.js's showView() switches on params.viewToLoad, and its
      * own promo-code handler builds the identical shape this uses.
      */
-    buildManualInstallRows: function (packages) {
+    buildManualInstallRows: function (packages, appsSwitchOff) {
         for (var i = 0; i < this.manualInstallRows.length; i++) {
             if (!this.manualInstallRows[i].destroyed) {
                 this.manualInstallRows[i].destroy();
@@ -359,9 +359,16 @@ enyo.kind({
             return;
         }
 
-        this.$.manualInstallLabel.setContent(packages.length === 1
-            ? $L("This application could not be reinstalled automatically:")
-            : $L("These applications could not be reinstalled automatically:"));
+        // appsRestored false: nothing was tried, because the user's
+        // "Reinstall apps when restoring" switch is off. Say so, rather than
+        // call it a failure.
+        if (appsSwitchOff) {
+            this.$.manualInstallLabel.setContent($L("Reinstall apps when restoring is off, so these applications from the backup were not reinstalled:"));
+        } else {
+            this.$.manualInstallLabel.setContent(packages.length === 1
+                ? $L("This application could not be reinstalled automatically:")
+                : $L("These applications could not be reinstalled automatically:"));
+        }
 
         var self = this;
         packages.forEach(function (pkg) {
