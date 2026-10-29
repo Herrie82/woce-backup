@@ -28,7 +28,7 @@ function backupHasCredentials(backup) {
         // to ask. Requiring a file keeps us from demanding a passphrase to
         // unlock nothing.
         if (service.service === "com.palm.backup.credentials" &&
-                (service.files || []).length > 0) {
+                (typeof service.files === "number" ? service.files : (service.files || []).length) > 0) {
             found = true;
         }
     });

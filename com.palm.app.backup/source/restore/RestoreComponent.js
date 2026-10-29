@@ -137,7 +137,8 @@ enyo.kind({
      */
     startRestore: function (inSender, backup) {
         this.$.pane.selectViewByName("restoringPage");
-        this.$.restoringPage.startRestore({ manifestName: backup.manifestName });
+        this.$.restoringPage.startRestore({ manifestName: backup.manifestName,
+                                           hasCredentials: backup.hasCredentials === true });
     },
 
     restoreFinished: function () {

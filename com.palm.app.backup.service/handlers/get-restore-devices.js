@@ -120,7 +120,16 @@ function GetRestoreDevicesAssistant() {
                     dbVersion:    manifest.dbVersion,
                     type:         manifest.type,
                     skipped:      (manifest.skipped || []).length,
-                    packages:     (manifest.packages || []).length
+                    packages:     (manifest.packages || []).length,
+                    // Same summary as listBackups: the restore page reads it to
+                    // decide whether to ask for the backup passphrase.
+                    services:     (manifest.services || []).map(function (service) {
+                        return {
+                            service: service.service,
+                            size:    service.size,
+                            files:   (service.files || []).length
+                        };
+                    })
                 });
 
                 if (!newestDate && manifest.finished) {

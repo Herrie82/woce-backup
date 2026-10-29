@@ -373,6 +373,16 @@ async function main() {
         devices.result.devices[0].currentDevice === true);
     check("autoRestore is false with several backups",
         devices.result.autoRestore === false);
+    // The restore page decides whether to ask for the passphrase from these
+    // rows, so they must carry the same per-service summary listBackups does.
+    var listedServices = JSON.stringify(list.result.backups[0].services);
+    var deviceBackup = devices.result.devices[0].backups.filter(function (b) {
+        return b.manifestName === list.result.backups[0].manifestName;
+    })[0];
+    check("getRestoreDevices reports each backup's services like listBackups",
+        deviceBackup && listedServices !== undefined &&
+            JSON.stringify(deviceBackup.services) === listedServices,
+        deviceBackup && JSON.stringify(deviceBackup.services) + " vs " + listedServices);
 
     /* ---- restore ---- */
     section("Restore");
