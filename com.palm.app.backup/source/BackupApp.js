@@ -135,7 +135,7 @@ enyo.kind({
               onSuccess: "userDataSuccess" }
         ]},
 
-        { name: "passphraseDialog", className: "box-center popup", kind: "ModalDialog",
+        { name: "passphraseDialog", className: "box-center popup", kind: "ModalDialog", lazy: false,
           caption: $L("Backup passphrase"), components: [
             { className: "backup-info-text",
               content: $L("Choose a passphrase for your saved passwords. You will need the same one to restore them, and nothing else in the backup depends on it.") },

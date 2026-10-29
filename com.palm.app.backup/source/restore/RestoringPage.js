@@ -94,7 +94,7 @@ enyo.kind({
             ]}
         ]},
 
-        { name: "passphrasePopup", className: "box-center popup", kind: "ModalDialog",
+        { name: "passphrasePopup", className: "box-center popup", kind: "ModalDialog", lazy: false,
           caption: $L("Backup passphrase"), components: [
             { className: "backup-info-text",
               content: $L("This backup contains saved passwords. Enter the passphrase you chose when it was made. Skip it and everything else still restores - you will just re-enter your passwords.") },
