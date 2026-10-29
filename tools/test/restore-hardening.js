@@ -10,7 +10,8 @@
  *   - stored-file names and package ids that are not plain names, including
  *     shell metacharacters (';', '$()', backquotes);
  *   - app tarballs whose members leave the app's own directory;
- *   - the restoreUserApps setting, which used to be ignored.
+ *   - the restoreUserApps setting, which used to be ignored;
+ *   - the backup passphrase and keystore, which used to be logged.
  *
  * Called from run-tests.js, which owns the counters and the sandbox.
  */
@@ -394,4 +395,66 @@ module.exports = async function (t) {
     } else {
         check("real-tar listing tests skipped: no usable tar/symlinks on this host", true);
     }
+
+    /* ------------------------------------------------ log redaction */
+    t.section("Secrets are not logged");
+
+    var SECRET = "S3cret-Passphrase-xyzzy";
+    var KEYSTORE_SECRET = "keystore-ciphertext-plugh";
+    var lines = [];
+    var services = t.buildServices();
+    services["com.palm.keymanager"] = {
+        exportKeystore: function (args) {
+            // What PalmCall's error text looks like: the call and its payload.
+            throw new Error("palm://com.palm.keymanager/exportKeystore " +
+                JSON.stringify(args) + ": Denied");
+        },
+        importKeystore: function () {
+            return { returnValue: true, imported: 1, skipped: 0, failed: [] };
+        }
+    };
+    var logCtx = newCtx({
+        services: services,
+        console: { log: function (line) { lines.push(String(line)); },
+                   error: function (line) { lines.push(String(line)); } }
+    });
+    logCtx.__secret = SECRET;
+    logCtx.__ks = KEYSTORE_SECRET;
+    var exp = await settle(call(logCtx,
+        "system.palmcall('com.palm.keymanager', 'exportKeystore', { passphrase: __secret })"));
+    var imp = await settle(call(logCtx,
+        "system.palmcall('com.palm.keymanager', 'importKeystore', " +
+        "{ passphrase: __secret, keystore: { data: __ks }, overwrite: false })"));
+    var logged = lines.join("\n");
+    check("the calls were logged at all", /Calling palm:\/\/com.palm.keymanager/.test(logged),
+        logged.slice(0, 200));
+    check("the passphrase is not in the log", logged.indexOf(SECRET) === -1,
+        logged.split("\n").filter(function (l) { return l.indexOf(SECRET) !== -1; })[0]);
+    check("the keystore is not in the log", logged.indexOf(KEYSTORE_SECRET) === -1);
+    check("the error handed back does not carry the passphrase either",
+        exp.error && String(exp.error.message).indexOf(SECRET) === -1 &&
+            /exportKeystore/.test(exp.error.message),
+        exp.error && exp.error.message);
+    check("a successful call still returns its result", imp.result && imp.result.imported === 1,
+        JSON.stringify(imp));
+
+    // The luna-send fallback: its failure text must not repeat the command
+    // line, which holds the payload.
+    var lunaChild = {
+        execFile: function (file, args, opts, cb) {
+            var err = new Error("Command failed: " + file + " " + args.join(" "));
+            err.code = 1;
+            setTimeout(function () { (cb || opts)(err, "", ""); }, 1);
+        }
+    };
+    var lunaCtx = newCtx({
+        require: function (name) { return name === "child_process" ? lunaChild : require(name); }
+    });
+    vm.runInContext("privileged.setDirectModeForTesting(true);", lunaCtx);
+    lunaCtx.__secret = SECRET;
+    var luna = await settle(call(lunaCtx,
+        "privileged.lunacall('com.palm.keymanager', 'exportKeystore', { passphrase: __secret })"));
+    check("a failed luna-send does not echo its payload",
+        luna.error && String(luna.error.message).indexOf(SECRET) === -1,
+        luna.error && luna.error.message);
 };
