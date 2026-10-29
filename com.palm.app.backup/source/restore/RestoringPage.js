@@ -181,6 +181,9 @@ enyo.kind({
         if (this.params.hasCredentials && !this.params.passphrase && !this.passphraseAsked) {
             this.passphraseAsked = true;
             this.$.passphraseInput.setValue("");
+            // No call is outstanding while the prompt is up, and Accept/Skip
+            // come back through here - left set, they would no-op.
+            this.awaitingResponse = false;
             this.$.passphrasePopup.openAtCenter();
             return;
         }
