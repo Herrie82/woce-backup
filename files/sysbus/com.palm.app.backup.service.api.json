@@ -18,6 +18,8 @@
         "com.palm.app.backup.service/setTarget",
         "com.palm.app.backup.service/getUserDataCategories",
         "com.palm.app.backup.service/setUserDataCategories",
+        "com.palm.app.backup.service/getRestoreOptions",
+        "com.palm.app.backup.service/setRestoreOptions",
         "com.palm.app.backup.service/scheduledBackup"
     ]
 }

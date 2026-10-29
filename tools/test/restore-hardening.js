@@ -325,6 +325,91 @@ module.exports = async function (t) {
     check("no injected command ran",
         !fs.existsSync(path.join(ROOT, "pwned")) && !fs.existsSync(path.join(ROOT, "pwned2")));
 
+    /* ------------------------------------------------ the app's switch */
+    t.section("The 'Reinstall apps when restoring' switch (restore options)");
+
+    var optCtx = newCtx();
+    var getOpt = await t.run(optCtx, "GetRestoreOptionsAssistant", {});
+    check("getRestoreOptions: restoreUserApps is off by default",
+        !getOpt.error && getOpt.result.returnValue === true &&
+            getOpt.result.restoreUserApps === false,
+        JSON.stringify(getOpt.error ? getOpt.error.message : getOpt.result));
+
+    var prefsBefore = vm.runInContext("JSON.stringify(prefs.get().result)", optCtx);
+    var badCalls = [
+        [{ restoreUserApps: "true" }, "a string 'true'"],
+        [{ restoreUserApps: 1 }, "the number 1"],
+        [{ restoreUserApps: true, userEnabled: true }, "an extra key (userEnabled)"],
+        [{ targetId: "x" }, "an unknown key alone"],
+        [{}, "no option at all"]
+    ];
+    for (var bi = 0; bi < badCalls.length; bi++) {
+        var bad = await t.run(optCtx, "SetRestoreOptionsAssistant", badCalls[bi][0]);
+        check("setRestoreOptions refuses " + badCalls[bi][1], !!bad.error,
+            JSON.stringify(bad.result));
+    }
+    var afterBad = await t.run(optCtx, "GetRestoreOptionsAssistant", {});
+    check("...and none of the refused calls changed anything",
+        afterBad.result && afterBad.result.restoreUserApps === false &&
+            vm.runInContext("JSON.stringify(prefs.get().result)", optCtx) === prefsBefore,
+        JSON.stringify([afterBad.result, prefsBefore]));
+
+    // The real thing: the switch, not a per-call argument, turns app restore
+    // on - through the same prefs row restore.js reads.
+    pkgCtx.__installIds.length = 0;
+    pkgCtx.__dirIds.length = 0;
+    var setOn = await t.run(pkgCtx, "SetRestoreOptionsAssistant", { restoreUserApps: true });
+    check("setRestoreOptions(true) succeeds and echoes the stored value",
+        !setOn.error && setOn.result.returnValue === true && setOn.result.restoreUserApps === true,
+        JSON.stringify(setOn.error ? setOn.error.message : setOn.result));
+    var readBack = await t.run(pkgCtx, "GetRestoreOptionsAssistant", {});
+    check("getRestoreOptions reads it back", readBack.result && readBack.result.restoreUserApps === true,
+        JSON.stringify(readBack.result));
+    check("it is stored where restore.js reads it (prefs.restoreUserApps)",
+        vm.runInContext("prefs.get().result.restoreUserApps", pkgCtx) === true);
+    var switchOn = await t.run(pkgCtx, "RestoreAssistant", { manifestName: PKG_CRAFTED }, []);
+    check("with the switch on, a restore with no per-call flag reinstalls apps",
+        !switchOn.error && switchOn.result.appsRestored === true &&
+            JSON.stringify(pkgCtx.__installIds) === JSON.stringify(["com.example.fine"]),
+        JSON.stringify([switchOn.error && switchOn.error.message, pkgCtx.__installIds]));
+
+    pkgCtx.__installIds.length = 0;
+    var setOff = await t.run(pkgCtx, "SetRestoreOptionsAssistant", { restoreUserApps: false });
+    check("setRestoreOptions(false) succeeds",
+        !setOff.error && setOff.result.restoreUserApps === false,
+        JSON.stringify(setOff.error ? setOff.error.message : setOff.result));
+    var switchOff = await t.run(pkgCtx, "RestoreAssistant", { manifestName: PKG_CRAFTED }, []);
+    check("switched back off, the next restore touches no package",
+        !switchOff.error && switchOff.result.appsRestored === false &&
+            pkgCtx.__installIds.length === 0,
+        JSON.stringify([switchOff.error && switchOff.error.message, pkgCtx.__installIds]));
+
+    // Wiring the bus and the UI need, checked from the files themselves -
+    // there is no Enyo runtime on the host to drive the app.
+    var REPO = path.join(__dirname, "..", "..");
+    var rd = function (rel) { return fs.readFileSync(path.join(REPO, rel), "utf8"); };
+    var servicesJson = JSON.parse(rd("com.palm.app.backup.service/services.json"));
+    var commands = {};
+    servicesJson.services[0].commands.forEach(function (c) { commands[c.name] = c.assistant; });
+    check("services.json exposes getRestoreOptions and setRestoreOptions",
+        commands.getRestoreOptions === "GetRestoreOptionsAssistant" &&
+            commands.setRestoreOptions === "SetRestoreOptionsAssistant",
+        JSON.stringify([commands.getRestoreOptions, commands.setRestoreOptions]));
+    var apiJson = JSON.parse(rd("files/sysbus/com.palm.app.backup.service.api.json"));
+    var ops = apiJson["backup-service.operation"] || [];
+    check("the ACG api file grants both methods to backup-service.operation",
+        ops.indexOf("com.palm.app.backup.service/getRestoreOptions") !== -1 &&
+            ops.indexOf("com.palm.app.backup.service/setRestoreOptions") !== -1);
+    var infoSrc = rd("com.palm.app.backup/source/BackupInfo.js");
+    var appSrc = rd("com.palm.app.backup/source/BackupApp.js");
+    check("the main panel has the switch, default off, with its note",
+        /name: "restoreAppsButton", state: false/.test(infoSrc) &&
+            /package list saved in the backup/.test(infoSrc) &&
+            /onRestoreAppsChange: "restoreAppsChange"/.test(appSrc));
+    check("the app stores the switch as a boolean restoreUserApps",
+        /setRestoreOptions\.call\(\{ restoreUserApps: state === true \}\)/.test(appSrc) &&
+            /getRestoreOptions\.call\(\)/.test(appSrc));
+
     /* ------------------------------------------------ argv execution */
     t.section("Privileged commands run as argv, never through a shell");
 

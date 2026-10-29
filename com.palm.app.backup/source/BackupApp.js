@@ -75,7 +75,8 @@ enyo.kind({
                       onOptIn: "optIn", onOptOut: "optOut",
                       onShowTargets: "showTargets",
                       onShowBackups: "showBackups",
-                      onShowUserData: "showUserData" },
+                      onShowUserData: "showUserData",
+                      onRestoreAppsChange: "restoreAppsChange" },
                     { name: "BackupProgressButton", kind: "BackupProgressButton",
                       pack: "center", onclick: "backupClick", onCancel: "cancelBackupClick" }
                 ]}
@@ -132,7 +133,13 @@ enyo.kind({
             { name: "setTarget", method: "setTarget", onSuccess: "setTargetSuccess" },
             { name: "listBackups", method: "listBackups", onSuccess: "listBackupsSuccess" },
             { name: "getUserDataCategories", method: "getUserDataCategories",
-              onSuccess: "userDataSuccess" }
+              onSuccess: "userDataSuccess" },
+            // Not one of refreshAll's counted steps: the launch scrim does not
+            // wait for the restore switch, which stays disabled until read.
+            { name: "getRestoreOptions", method: "getRestoreOptions",
+              onSuccess: "restoreOptionsSuccess", onFailure: "restoreOptionsFailure" },
+            { name: "setRestoreOptions", method: "setRestoreOptions",
+              onSuccess: "restoreOptionsSuccess", onFailure: "setRestoreOptionsFailure" }
         ]},
 
         { name: "passphraseDialog", className: "box-center popup", kind: "ModalDialog", lazy: false,
@@ -222,6 +229,8 @@ enyo.kind({
         this.$.listTargets.call();
         this.$.listBackups.call();
         this.$.getUserDataCategories.call();
+        this.$.info.setRestoreAppsDisabled(true);
+        this.$.getRestoreOptions.call();
     },
 
     /**
@@ -773,6 +782,33 @@ enyo.kind({
             ? rb.$L("Settings and data")
             : enabled.join(", "));
         this.$.userDataPage.setCategories(categories);
+    },
+
+    /* --------------------------------------------------- restore options */
+
+    restoreAppsChange: function (inSender, state) {
+        // Disabled until the service answers, so a second tap cannot race the
+        // first; the answer (or a re-read on failure) sets the real state.
+        this.$.info.setRestoreAppsDisabled(true);
+        this.$.setRestoreOptions.call({ restoreUserApps: state === true });
+    },
+
+    restoreOptionsSuccess: function (inSender, inResponse) {
+        this.$.info.setRestoreApps(inResponse && inResponse.restoreUserApps === true);
+        this.$.info.setRestoreAppsDisabled(false);
+    },
+
+    restoreOptionsFailure: function (inSender, inResponse) {
+        // Unknown means off: show it off and leave it disabled, rather than
+        // offer a switch whose stored value we could not read.
+        this.$.info.setRestoreApps(false);
+        this.$.info.setRestoreAppsDisabled(true);
+        this.warn("getRestoreOptions failed", inResponse);
+    },
+
+    setRestoreOptionsFailure: function (inSender, inResponse) {
+        this.warn("setRestoreOptions failed", inResponse);
+        this.$.getRestoreOptions.call();
     },
 
     /* ------------------------------------------------------------- misc */

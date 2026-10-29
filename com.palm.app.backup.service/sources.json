@@ -35,5 +35,6 @@
     { "source": "handlers/get-restore-devices.js" },
     { "source": "handlers/list-backups.js" },
     { "source": "handlers/targets.js" },
-    { "source": "handlers/user-data.js" }
+    { "source": "handlers/user-data.js" },
+    { "source": "handlers/restore-options.js" }
 ]
