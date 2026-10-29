@@ -8,7 +8,7 @@
  * connection check is what a Synergy target will need later.
  */
 /*global allocBuffer, Future, PalmCall, logger, isEmpty, platform, require, fileUtil,
-  privileged, tolerate, WORK_ROOT */
+  privileged, tolerate, WORK_ROOT, redactSecrets, redactText */
 
 var system = (function () {
     var that = {};
@@ -78,7 +78,9 @@ var system = (function () {
         var fullUrl = url + "/" + cmd;
         args = args !== undefined ? args : {};
 
-        logger.log("Calling", fullUrl, "with", args);
+        // Redacted here and not only in the logger: args can carry the
+        // backup passphrase and keystore (credentials.js).
+        logger.log("Calling", fullUrl, "with", redactSecrets(args));
         var future = safeCall(url, cmd, args);
         future.then(this, function (f) {
             var err;
@@ -91,7 +93,17 @@ var system = (function () {
             }
 
             if (!isUnreachable(err)) {
-                logger.error("Call to", fullUrl, "failed:", err.message || err);
+                // PalmCall's message interpolates the call's arguments, so a
+                // failed keymanager call would carry the passphrase onward -
+                // into this log, the restore status and the manifest. Scrub
+                // the error itself, not just this line.
+                var scrubbed = redactText(err.message || err);
+                try {
+                    err.message = scrubbed;
+                } catch (readOnly) {
+                    err = new Error(scrubbed);
+                }
+                logger.error("Call to", fullUrl, "failed:", scrubbed);
                 err.serviceId = serviceId;
                 throw err;
             }
