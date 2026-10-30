@@ -119,7 +119,14 @@ var state = {
     notesPayload:    "first note\nsecond note\n",
     restored:        {},
     restoreFinishedCalls: [],
-    postBackupCalls: 0
+    postBackupCalls: 0,
+    // "legacy" accepts the stock battery requirement; "luneos" refuses it as
+    // LuneOS's Activity Manager does.
+    activityManager: "legacy",
+    // undefined = the query fails; otherwise the percent reported.
+    battery: 88,
+    // undefined = the query fails; otherwise whether a charger is connected.
+    charger: false
 };
 
 var TEMP_DIR = path.join(ROOT, "tempdir").replace(/\\/g, "/") + "/";
@@ -155,8 +162,17 @@ function buildServices() {
         },
 
         "com.palm.power": {
-            "/com/palm/power/batteryStatusQuery": function () {
-                return { returnValue: true, percent: 88 };
+            "com/palm/power/batteryStatusQuery": function () {
+                if (state.battery === undefined) {
+                    throw new Error("battery service gone");
+                }
+                return { returnValue: true, percent: state.battery };
+            },
+            "com/palm/power/chargerStatusQuery": function () {
+                if (state.charger === undefined) {
+                    throw new Error("charger service gone");
+                }
+                return { returnValue: true, connected: state.charger };
             }
         },
 
@@ -167,7 +183,14 @@ function buildServices() {
         },
 
         "com.palm.activitymanager": {
-            create: function () { return { returnValue: true, activityId: 1 }; },
+            create: function (args) {
+                var requirements = args.activity.requirements;
+                if (state.activityManager === "luneos" && requirements &&
+                        requirements.battery !== undefined) {
+                    throw new Error("If 'battery' requirement is specified, the only legal value is 'true'");
+                }
+                return { returnValue: true, activityId: 1 };
+            },
             cancel: function () { return { returnValue: true }; }
         },
 
@@ -1723,6 +1746,12 @@ async function main() {
             vm.runInContext("(function(){var b = allocBuffer(7);" +
                 "return (typeof b.length === 'number' ? b.length : -1);}())", vintageCtx) === 7);
     }
+
+    /* ---- daily schedule, legacy and LuneOS ---- */
+    await require("./daily-schedule")({
+        check: check, section: section, run: run, state: state,
+        newContext: newContext, listFilesIn: listFilesIn, manifestDir: manifestDir
+    });
 
     /* ---- crafted manifests, argv execution, log redaction ---- */
     await require("./restore-hardening")({

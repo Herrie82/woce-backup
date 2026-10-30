@@ -1074,10 +1074,31 @@ function BackupAssistant() {
 function ScheduledBackupAssistant() {
     this.run = function (future) {
         logger.log("Scheduled backup firing");
-        var assistant = new BackupAssistant();
-        assistant.controller = this.controller;
-        this.controller.args.scheduled = true;
-        assistant.run(future);
+        var controller = this.controller;
+        var runBackup = function () {
+            var assistant = new BackupAssistant();
+            assistant.controller = controller;
+            controller.args.scheduled = true;
+            assistant.run(future);
+        };
+        // Only our own LuneOS activity asks for this; on legacy webOS the
+        // Activity Manager applies the battery floor before calling. A
+        // skipped day still completes the activity below, so tomorrow's run
+        // stays scheduled.
+        if (controller.args.checkBattery !== true) {
+            runBackup();
+            return;
+        }
+        var check = system.scheduledBackupAllowed();
+        check.then(this, function (f) {
+            if (!f.result) {
+                logger.log("Scheduled backup skipped: battery below " +
+                    system.SCHEDULED_MIN_BATTERY + "% and not charging");
+                future.result = { returnValue: true, STATUS: "Skipped", reason: "battery" };
+                return;
+            }
+            runBackup();
+        });
     };
 
     this.complete = function (activity) {
