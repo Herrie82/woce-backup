@@ -13,6 +13,7 @@ function ListBackupsAssistant() {
      */
     this.run = function (future) {
         var target;
+        var names;
 
         var chain = targets.getCurrent();
         chain.then(this, function (f) {
@@ -24,7 +25,13 @@ function ListBackupsAssistant() {
             f.nest(backup.listLocalManifests(false));
         });
         chain.then(this, function (f) {
-            var names = f.result;
+            names = f.result;
+            // To tell a saved-passwords export that is still in the store from
+            // one that is gone; see backup.describeCredentials.
+            f.nest(backup.getStoredFileMap(target));
+        });
+        chain.then(this, function (f) {
+            var stored = f.result;
             names.sort();
             names.reverse();
 
@@ -40,6 +47,7 @@ function ListBackupsAssistant() {
 
                 var info = backup.parseManifestName(name);
                 var deviceInfo = manifest.deviceInfo || {};
+                var saved = backup.describeCredentials(manifest, stored);
                 backups.push({
                     manifestName: name,
                     number:       info.number,
@@ -59,6 +67,14 @@ function ListBackupsAssistant() {
                     // Services the backup could not capture in full, so the UI
                     // can mark a partial backup rather than implying it is whole.
                     skipped:      manifest.skipped || [],
+                    // Saved passwords, worked out here so the app does not
+                    // have to read manifests: whether this backup has them,
+                    // whether they were carried from an earlier one and as
+                    // of when, and (below) the newest backup that has them.
+                    hasCredentials:         saved.hasCredentials,
+                    credentialsSkipped:     saved.credentialsSkipped,
+                    credentialsCarriedFrom: saved.credentialsCarriedFrom,
+                    credentialsAsOf:        saved.credentialsAsOf,
                     services:     (manifest.services || []).map(function (service) {
                         return {
                             service: service.service,
@@ -68,6 +84,8 @@ function ListBackupsAssistant() {
                     })
                 });
             });
+
+            backup.linkCredentialBackups(backups);
 
             f.result = {
                 returnValue: true,

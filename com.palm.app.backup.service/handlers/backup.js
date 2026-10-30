@@ -578,6 +578,40 @@ function BackupAssistant() {
         return zeroPad(next, 6) + getManifestNameSuffix(manifest);
     };
 
+    /**
+     * Fills an empty saved-passwords section from this device's last export
+     * when the run had no passphrase - see backup.carryCredentials. Only that
+     * case: with a passphrase the export is fresh or its failure is reported,
+     * and with the category off there is no section to fill.
+     *
+     * Tolerated: a backup that could not look back still has everything it
+     * captured itself, and an empty section says so.
+     */
+    var carryCredentials = function (manifest, manifestName) {
+        var index = -1;
+        manifest.services.forEach(function (service, i) {
+            if (service.service === credentials.SERVICE_ID && service.files.length === 0) {
+                index = i;
+            }
+        });
+        if (index === -1 || credentials.hasPassphrase()) {
+            return new Future(false);
+        }
+
+        var future = tolerate(backup.carryCredentials(target, manifestName,
+            manifest.deviceInfo.nduId), null);
+        future.then(this, function (f) {
+            var carried = f.result;
+            if (carried) {
+                logger.log("No passphrase for saved passwords; carrying forward the export from",
+                    carried.carriedFrom, "of", carried.carriedFromDate);
+                manifest.services[index] = carried;
+            }
+            f.result = !!carried;
+        });
+        return future;
+    };
+
     /* ------------------------------------------------------------ the backup */
 
     /**
@@ -757,6 +791,10 @@ function BackupAssistant() {
             f.nest(mapFuture(serviceList, function (serviceName) {
                 return backupService(serviceName, services, manifest, tempDir, progressIncrement);
             }));
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            f.nest(carryCredentials(manifest, manifestName));
         });
         future.then(this, function (f) {
             var result = f.result;
@@ -952,10 +990,13 @@ function BackupAssistant() {
                     logger.warn("Saved passwords were not backed up:", credentialsError);
                 }
                 credentials.setPassphrase(null);
+                // Set when the passwords in this backup are an earlier one's.
+                var carriedFrom = backup.describeCredentials(manifest).credentialsCarriedFrom;
                 backup.setStatusComplete({
                     manifestName: manifestName,
                     size:         manifest.size,
                     credentialsError: credentialsError || undefined,
+                    credentialsCarriedFrom: carriedFrom || undefined,
                     skipped:      skipped.length
                 });
                 f.result = {
@@ -964,6 +1005,7 @@ function BackupAssistant() {
                     manifestName: manifestName,
                     size:         manifest.size,
                     credentialsError: credentialsError || undefined,
+                    credentialsCarriedFrom: carriedFrom || undefined,
                     skipped:      skipped
                 };
             } finally {
