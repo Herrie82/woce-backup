@@ -921,6 +921,9 @@ function RestoreAssistant() {
                 restoreCount: manifest.restoredCount,
                 backedUpFrom: manifest.deviceInfo,
                 backedUpOs:   manifest.osVersion,
+                // Whether saved passwords were in the backup, and when they
+                // were carried from an earlier one, which and as of when.
+                credentials:  backup.describeCredentials(manifest),
                 summary:      counts,
                 skipped:      skipped,
                 packages:     receiptPackages

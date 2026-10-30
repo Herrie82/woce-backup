@@ -44,6 +44,7 @@ var credentials = (function () {
     // The staged filename, and what restore looks for. Deliberately not a
     // ".json" the user might open and mistake for readable: it is ciphertext.
     var STAGED_NAME = "keystore-export";
+    that.STAGED_NAME = STAGED_NAME;
 
     // Held for the duration of one run only. Never written to prefs, never in
     // the manifest, never logged - a passphrase that outlived the operation it
@@ -60,6 +61,14 @@ var credentials = (function () {
     that.setPassphrase = function (value) {
         passphrase = (typeof value === "string" && value.length > 0) ? value : null;
         lastError = null;
+    };
+
+    /* Whether this run was given a passphrase. The backup engine asks, so it
+     * can tell "skipped: no passphrase" (carry the last export forward) from
+     * an export that was tried and failed (do not).
+     */
+    that.hasPassphrase = function () {
+        return passphrase !== null;
     };
 
     /* The last credentials failure of this run, or null.

@@ -1731,6 +1731,12 @@ async function main() {
         manifestDir: manifestDir
     });
 
+    /* ---- saved passwords without a passphrase (rebuilds the sandbox) ---- */
+    await require("./credentials-carry")({
+        harness: harness, check: check, section: section, run: run,
+        buildServices: buildServices, buildSandbox: buildSandbox, ROOT: ROOT
+    });
+
     /* ---- summary ---- */
     console.log("\n" + passed + " passed, " + failed + " failed");
     rmrf(ROOT);

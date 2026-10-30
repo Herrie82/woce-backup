@@ -53,6 +53,7 @@ function GetRestoreDevicesAssistant() {
     this.run = function (future) {
         var myNduId;
         var target;
+        var names;
         var newestDate = null;
 
         var chain = targets.getCurrent();
@@ -76,7 +77,12 @@ function GetRestoreDevicesAssistant() {
             f.nest(backup.listLocalManifests(false));
         });
         chain.then(this, function (f) {
-            var names = f.result;
+            names = f.result;
+            // See listBackups: an export missing from the store is not counted.
+            f.nest(backup.getStoredFileMap(target));
+        });
+        chain.then(this, function (f) {
+            var stored = f.result;
             names.sort();
 
             // Group manifests by the device that wrote them.
@@ -113,9 +119,16 @@ function GetRestoreDevicesAssistant() {
                     };
                 }
 
+                var saved = backup.describeCredentials(manifest, stored);
                 deviceMap[nduId].backups.push({
                     manifestName: name,
                     date:         manifest.finished,
+                    // Same saved-password fields as listBackups; the picker
+                    // warns before restoring a backup that has none.
+                    hasCredentials:         saved.hasCredentials,
+                    credentialsSkipped:     saved.credentialsSkipped,
+                    credentialsCarriedFrom: saved.credentialsCarriedFrom,
+                    credentialsAsOf:        saved.credentialsAsOf,
                     size:         manifest.size,
                     dbVersion:    manifest.dbVersion,
                     type:         manifest.type,
@@ -132,6 +145,8 @@ function GetRestoreDevicesAssistant() {
             var totalBackups = 0;
             for (var id in deviceMap) {
                 if (deviceMap.hasOwnProperty(id)) {
+                    // Already one device per entry, so one chain per call.
+                    backup.linkCredentialBackups(deviceMap[id].backups);
                     devices.push(deviceMap[id]);
                     totalBackups += deviceMap[id].backups.length;
                 }

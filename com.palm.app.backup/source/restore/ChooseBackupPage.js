@@ -20,6 +20,11 @@
  * registers; a backup made before that existed simply does not have it.
  */
 function backupHasCredentials(backup) {
+    // listBackups and getRestoreDevices say so directly; the service list is
+    // only read for an answer from a service too old to.
+    if (backup && typeof backup.hasCredentials === "boolean") {
+        return backup.hasCredentials;
+    }
     var services = (backup && backup.services) || [];
     var found = false;
     services.forEach(function (service) {
@@ -33,6 +38,37 @@ function backupHasCredentials(backup) {
         }
     });
     return found;
+}
+
+/**
+ * What the restore confirmation says about saved passwords, or "" for nothing.
+ *
+ * A backup made without the passphrase has no passwords in it, and restoring
+ * it - usually the newest, so the obvious choice - brought the accounts back
+ * with every password missing and no word about it. Said before the restore,
+ * with the newest backup that does have them, so the user can pick that one.
+ * The fields come from the service (listBackups, getRestoreDevices).
+ */
+function credentialsRestoreNote(backup, formatDate) {
+    if (!backup) {
+        return "";
+    }
+    if (backupHasCredentials(backup)) {
+        // Carried forward from an earlier backup: the passwords are as of
+        // then, and so is the passphrase that unlocks them.
+        return backup.credentialsCarriedFrom
+            ? enyo.macroize($L("Saved passwords in this backup are from {$date}. Restoring them needs the passphrase you used then."),
+                { date: formatDate(backup.credentialsAsOf) })
+            : "";
+    }
+    if (backup.credentialsBackup) {
+        return enyo.macroize($L("This backup has no saved passwords, so none will be restored. The most recent backup with saved passwords is from {$date}; choose that one to get them back."),
+            { date: formatDate(backup.credentialsBackup.date) });
+    }
+    if (backup.credentialsSkipped) {
+        return $L("This backup has no saved passwords, so none will be restored.");
+    }
+    return "";
 }
 
 enyo.kind({
@@ -106,6 +142,7 @@ enyo.kind({
         { name: "confirmDialog", kind: "ModalDialog", lazy: true, className: "popup",
           caption: $L("Restore this backup?"), components: [
             { name: "confirmMessage", className: "enyo-text-body", content: "" },
+            { name: "credentialsNote", className: "enyo-text-body", showing: false, content: "" },
             { layoutKind: "HFlexLayout", pack: "center", components: [
                 { kind: "Button", caption: $L("Cancel"), flex: 1,
                   onclick: "closeConfirm", style: "margin-right: 10px" },
@@ -166,7 +203,10 @@ enyo.kind({
                     type:         backup.type,
                     skipped:      backup.skipped,
                     incompatible: backup.dbVersion >= self.inCompatibleVersion,
-                    hasCredentials: backupHasCredentials(backup)
+                    hasCredentials: backupHasCredentials(backup),
+                    credentialsNote: credentialsRestoreNote(backup, function (date) {
+                        return self.formatDate(date);
+                    })
                 });
             });
         });
@@ -193,6 +233,9 @@ enyo.kind({
         }
         if (row.skipped > 0) {
             detail.push(enyo.macroize($L("{$count} skipped"), { count: row.skipped }));
+        }
+        if (row.credentialsNote && !row.hasCredentials) {
+            detail.push($L("No saved passwords"));
         }
         this.$.detail.setContent(detail.join(" · "));
 
@@ -253,6 +296,8 @@ enyo.kind({
         this.$.confirmMessage.setContent(enyo.macroize(
             $L("Replace the data on this device with the backup from {$date}? Your current accounts, contacts and settings will be overwritten."),
             { date: this.formatDate(row.date) }));
+        this.$.credentialsNote.setContent(row.credentialsNote || "");
+        this.$.credentialsNote.setShowing(!!row.credentialsNote);
         this.$.confirmDialog.openAtCenter();
     },
 

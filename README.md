@@ -149,6 +149,17 @@ Doctor, and onto different hardware. It also means **anyone with access to the
 device's USB storage can read your accounts and settings**. If that matters for
 your threat model, copy the backup somewhere safe and delete it from the device.
 
+Saved passwords are the exception. With the "Saved passwords" category on,
+`com.palm.keymanager` exports them encrypted under a backup passphrase you type
+in, and only a run that has the passphrase can make a fresh export. A run
+without one (the scheduled daily backup, say) does not leave the backup
+without passwords: it references the encrypted export from this device's most
+recent earlier backup that has one, by the same content-addressed file, and
+the manifest records which backup that was and its date. Restoring those
+passwords takes the passphrase used then. When the backup you pick has no
+passwords at all, the restore confirmation says so and names the newest
+backup that does.
+
 The same applies to writing one: nothing authenticates a backup, so a restore
 treats its manifest as untrusted input. Every path, stored-file name and
 package id in it is checked before use (`util/restore-policy.js`), and an

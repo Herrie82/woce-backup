@@ -55,6 +55,7 @@ enyo.kind({
         { name: "restoreDialog", kind: "ModalDialog", lazy: true, className: "popup",
           caption: $L("Restore this backup?"), components: [
             { name: "restoreMessage", className: "enyo-text-body", content: "" },
+            { name: "credentialsNote", className: "enyo-text-body", showing: false, content: "" },
             { layoutKind: "HFlexLayout", pack: "center", components: [
                 { kind: "Button", caption: $L("Cancel"), flex: 1,
                   onclick: "closeRestoreDialog", style: "margin-right: 10px" },
@@ -138,6 +139,9 @@ enyo.kind({
         if (backup.skipped && backup.skipped.length > 0) {
             parts.push(enyo.macroize($L("{$count} skipped"), { count: backup.skipped.length }));
         }
+        if (!backupHasCredentials(backup) && (backup.credentialsSkipped || backup.credentialsBackup)) {
+            parts.push($L("No saved passwords"));
+        }
         if (backup.restoredCount > 0) {
             parts.push(enyo.macroize($L("Restored on {$date}"),
                 { date: this.formatDate(backup.lastRestored) }));
@@ -188,6 +192,14 @@ enyo.kind({
         this.$.restoreMessage.setContent(enyo.macroize(
             $L("Replace the data on this device with the backup from {$date}? Your current accounts, contacts and settings will be overwritten."),
             { date: this.formatDate(backup.date) }));
+        // Saved passwords: missing from this backup, or carried from an
+        // earlier one - see credentialsRestoreNote in ChooseBackupPage.js.
+        var self = this;
+        var note = credentialsRestoreNote(backup, function (date) {
+            return self.formatDate(date);
+        });
+        this.$.credentialsNote.setContent(note);
+        this.$.credentialsNote.setShowing(!!note);
         this.$.restoreDialog.openAtCenter();
     },
 
