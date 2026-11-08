@@ -1655,6 +1655,147 @@ async function main() {
         fs.readFileSync(cachedPath, "utf8") === fs.readFileSync(targetPath, "utf8"),
         "cache still holds: " + fs.readFileSync(cachedPath, "utf8").slice(0, 70));
 
+    /* ---- overlapping syncs must never hide a backup ---- */
+    section("Concurrent manifest syncs");
+
+    // refreshAll fires listBackups and getLastBackupTime together, and every
+    // window activation does it again - so several syncManifests are routinely
+    // in flight at once. Each one re-fetches every manifest into the shared
+    // cache. When that re-fetch truncated the cached file in place, a handler
+    // reading it in the meantime got "" and skipped the manifest as
+    // unreadable: the app showed "0 backups" with one sitting right there.
+    //
+    // On a fast host the gap between a write stream opening (truncating) and
+    // its first write landing is too short to hit by chance, so the writes are
+    // held back the way the device's flash holds them back.
+    var realFs = require("fs");
+    var slowFs = Object.create(realFs);
+    slowFs.createWriteStream = function () {
+        var stream = realFs.createWriteStream.apply(realFs, arguments);
+        var realWrite = stream.write;
+        stream.write = function () {
+            var args = arguments;
+            var self = this;
+            setTimeout(function () { realWrite.apply(self, args); }, 15);
+            return true;
+        };
+        var realEnd = stream.end;
+        stream.end = function () {
+            var args = arguments;
+            var self = this;
+            setTimeout(function () { realEnd.apply(self, args); }, 30);
+        };
+        return stream;
+    };
+    var slowCtx = harness.loadService({
+        root: ROOT,
+        services: buildServices(),
+        quiet: !process.env.VERBOSE,
+        require: function (name) { return name === "fs" ? slowFs : require(name); }
+    });
+    vm.runInContext("privileged.setAvailableForTesting(false);", slowCtx);
+    vm.runInContext("prefs.set({ userEnabled: true });", slowCtx);
+
+    var expectedCount = listFilesIn(manifestDir()).filter(function (name) {
+        return /^[0-9]{6}(-[0-9a-zA-Z]+)?$/.test(name);
+    }).length;
+    var short = [];
+    for (var round = 0; round < 5; round++) {
+        var calls = [];
+        for (var k = 0; k < 3; k++) {
+            calls.push(run(slowCtx, "ListBackupsAssistant", {}));
+            calls.push(run(slowCtx, "GetLastBackupTimeAssistant", {}));
+            // Staggered, as real calls arrive: in lockstep every sync finishes
+            // its writes together and nobody reads in the middle of one.
+            await new Promise(function (resolve) { setTimeout(resolve, 7 * (round + 1)); });
+        }
+        var answers = await Promise.all(calls);
+        answers.forEach(function (answer, idx) {
+            if (idx % 2 !== 0) {
+                return;
+            }
+            var n = answer.error ? -1 : answer.result.backups.length;
+            if (n !== expectedCount) {
+                short.push("round " + round + ": " + n);
+            }
+        });
+    }
+    check("every overlapping listBackups sees all " + expectedCount + " backups",
+        short.length === 0, short.slice(0, 5).join("; "));
+    var leftovers = listFilesIn(path.join(ROOT, "work", "manifests")).filter(function (name) {
+        return !/^[0-9]{6}(-[0-9a-zA-Z]+)?$/.test(name) && name !== "temp";
+    });
+    check("overlapping syncs leave no scratch files in the manifest cache",
+        leftovers.length === 0, leftovers.join(", "));
+
+    // A cached manifest the target does not have is still dropped...
+    var cacheDir = path.join(ROOT, "work", "manifests");
+    fs.writeFileSync(path.join(cacheDir, "999998-abc123"), "{}");
+    var afterStale = await run(context, "ListBackupsAssistant", {});
+    check("a cached manifest missing from the target is dropped",
+        !fs.existsSync(path.join(cacheDir, "999998-abc123")) &&
+        !afterStale.error && afterStale.result.backups.length === expectedCount,
+        afterStale.error ? afterStale.error.message
+            : String(afterStale.result.backups.length));
+
+    // ...but not one a backup finished writing while the sync was running.
+    // storeManifest writes the target, then the cache; a sync whose target
+    // listing predates that sees the name only locally. Stage exactly that:
+    // the backup "lands" right after the sync's first target listing.
+    var landed = "999999-abc123";
+    vm.runInContext(
+        "(function () {" +
+        "  var realList = LocalTarget.prototype.list; var fired = false;" +
+        "  LocalTarget.prototype.list = function (p) {" +
+        "    var lf = realList.apply(this, arguments);" +
+        "    if (!fired && p === MANIFESTS_PATH) {" +
+        "      fired = true;" +
+        "      lf.then(function (inner) { var r = inner.result; __landManifest(); inner.result = r; });" +
+        "    }" +
+        "    return lf;" +
+        "  };" +
+        "  __restoreList = function () { LocalTarget.prototype.list = realList; };" +
+        "}());", context);
+    context.__landManifest = function () {
+        var body = fs.readFileSync(path.join(manifestDir(), listFilesIn(manifestDir())[0]));
+        fs.writeFileSync(path.join(manifestDir(), landed), body);
+        fs.writeFileSync(path.join(cacheDir, landed), body);
+    };
+    var duringBackup = await run(context, "ListBackupsAssistant", {});
+    vm.runInContext("if (typeof __restoreList === 'function') { __restoreList(); }", context);
+    check("a manifest stored while a sync runs is not dropped as stale",
+        fs.existsSync(path.join(cacheDir, landed)) &&
+        !duringBackup.error && duringBackup.result.backups.some(function (b) {
+            return b.manifestName === landed;
+        }),
+        duringBackup.error ? duringBackup.error.message
+            : duringBackup.result.backups.map(function (b) { return b.manifestName; }).join(","));
+    fs.unlinkSync(path.join(manifestDir(), landed));
+    await run(context, "ListBackupsAssistant", {});
+
+    // A manifest the target lists but cannot hand over: the cached copy goes,
+    // the reply still comes, and no scratch file is left behind.
+    var unreadable = listFilesIn(manifestDir())[0];
+    var unreadablePath = path.join(manifestDir(), unreadable);
+    fs.chmodSync(unreadablePath, 0);
+    var canRead = true;
+    try { fs.closeSync(fs.openSync(unreadablePath, "r")); } catch (err) { canRead = false; }
+    if (!canRead) {
+        var withUnreadable = await run(context, "ListBackupsAssistant", {});
+        var cacheLeft = listFilesIn(cacheDir);
+        check("an unfetchable manifest is dropped from the cache and the call still answers",
+            !withUnreadable.error && cacheLeft.indexOf(unreadable) === -1 &&
+            withUnreadable.result.backups.length === expectedCount - 1,
+            withUnreadable.error ? withUnreadable.error.message : cacheLeft.join(","));
+        check("and leaves no scratch file behind",
+            cacheLeft.every(function (n) { return n.indexOf(".sync-") === -1; }),
+            cacheLeft.join(","));
+    } else {
+        console.log("  SKIP  unfetchable-manifest check (running as root, chmod 0 does not block reads)");
+    }
+    fs.chmodSync(unreadablePath, 420);
+    await run(context, "ListBackupsAssistant", {});
+
     /* ---- pathExists and allocBuffer across node vintages ---- */
     section("Old-node APIs resolve on every runtime this service runs on");
 

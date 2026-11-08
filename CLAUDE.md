@@ -215,6 +215,15 @@ which loads automatically when working in that directory.
   writes the manifest back after a successful restore, tolerated like the
   staging cleanup next to it: the restore already succeeded, so a failed
   write-back must not turn that into a reported failure.
+- **Manifest syncs overlap, so the cache must be replaced, never rewritten in
+  place.** `refreshAll` fires `listBackups` and `getLastBackupTime` together,
+  and each runs `syncManifests`, which re-fetches every manifest. `fileUtil.cp`
+  truncates its destination on open, so fetching straight into
+  `MANIFEST_ROOT/<name>` let another handler read an empty file, skip it as
+  unreadable, and report "0 backups" with one there. `refetchManifest` now
+  fetches to a unique `<name>.sync-N` and renames it over the cached copy. For
+  the same reason the stale drop re-lists the target before deleting: a backup
+  finishing mid-sync is in the local listing but not in the earlier target one.
 - **Never `DB.put` an existing object** — mojodb rejects it with `_rev must be
   specified for existing objects`, and caching a `_rev` just goes stale. Use
   `DB.merge({from: KIND}, props)`, which is what the stock service did.

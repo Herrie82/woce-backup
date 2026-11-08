@@ -729,17 +729,57 @@ var backup = (function () {
      * rejects, so one unreachable manifest cannot abort the sync for the rest
      * (mapFuture chains sequentially and an exception would strand the others).
      */
+    var refetchSeq = 0;
     var refetchManifest = function (target, name, failed) {
-        var future = target.get(MANIFESTS_PATH + name, MANIFEST_ROOT + name);
+        // Fetched beside the cached copy and renamed over it, never written
+        // into it: cp() truncates its destination on open, and several syncs
+        // routinely overlap (refreshAll fires listBackups and getLastBackupTime
+        // together). A handler reading the cache mid-copy got an empty file,
+        // skipped it as unreadable, and the app showed "0 backups" with one
+        // there. rename() swaps the whole file in, so a reader sees the old
+        // copy or the new one. The suffix is unique per fetch so two syncs
+        // cannot share a scratch file, and the dot keeps it out of
+        // MANIFEST_NAME_REGEX, so listLocalManifests never reports it.
+        //
+        // A failure is recorded in fetchError and handled at the end rather
+        // than rethrown through the chain: Foundations logs every rethrow, and
+        // the warning below already says what went wrong.
+        var scratch = MANIFEST_ROOT + name + ".sync-" + (++refetchSeq);
+        var fetchError = null;
+        var future = target.get(MANIFESTS_PATH + name, scratch);
         future.then(this, function (f) {
-            if (!f.exception) {
+            if (f.exception) {
+                fetchError = f.exception;
+                f.result = false;
+                return;
+            }
+            var swap = fileUtil.mv(scratch, MANIFEST_ROOT + name);
+            swap.then(this, function (sf) {
+                if (sf.exception) {
+                    fetchError = sf.exception;
+                }
+                sf.result = true;
+            });
+            f.nest(swap);
+        });
+        future.then(this, function (f) {
+            var done = f.result;
+            if (!fetchError) {
                 f.result = name;
                 return;
             }
-            logger.warn("Could not fetch manifest", name, "-", f.exception.message,
+            logger.warn("Could not fetch manifest", name, "-", fetchError.message,
                 "- dropping the cached copy rather than trusting it");
             failed.push(name);
-            var cleanup = fileUtil.rmIfExists(MANIFEST_ROOT + name);
+            var cleanup = fileUtil.rmIfExists(scratch);
+            cleanup.then(this, function (cf) {
+                // Reading exception marks it handled; assigning would fire the
+                // next callback before the nest below completes.
+                if (cf.exception) {
+                    logger.warn("Could not remove", scratch, "-", cf.exception.message);
+                }
+                cf.nest(fileUtil.rmIfExists(MANIFEST_ROOT + name));
+            });
             cleanup.then(this, function (cf) {
                 cf.exception = undefined;   // handled: do not strand the chain
                 cf.result = name;
@@ -812,6 +852,28 @@ var backup = (function () {
             });
             work.then(this, function (wf) {
                 var result = wf.result;
+                if (stale.length === 0) {
+                    wf.result = result;
+                    return;
+                }
+                // Ask the target again right before deleting anything. The
+                // listing above may predate a backup that finished during
+                // the re-fetch: storeManifest writes the target and then the
+                // cache, so its new manifest is in our local listing but not
+                // in that target listing, and would be dropped as stale.
+                wf.nest(target.list(MANIFESTS_PATH));
+            });
+            work.then(this, function (wf) {
+                var entries = wf.result;
+                if (stale.length > 0) {
+                    var present = {};
+                    (entries || []).forEach(function (entry) {
+                        if (!entry["Is-Folder"]) {
+                            present[entry.Name] = true;
+                        }
+                    });
+                    stale = stale.filter(function (name) { return !present[name]; });
+                }
                 wf.nest(mapFuture(stale, function (name) {
                     logger.log("Dropping stale cached manifest", name);
                     return fileUtil.rmIfExists(MANIFEST_ROOT + name);
