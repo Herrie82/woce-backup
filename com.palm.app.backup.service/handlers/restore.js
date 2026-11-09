@@ -158,36 +158,20 @@ function RestoreAssistant() {
             return new Future({});
         }
 
-        // Compressed files have to be fetched to a scratch name and expanded;
-        // uncompressed ones can be written directly to their destination.
         var stagedName = viaHelper ? String(toUnstage.length) + "-" + storedName : null;
         var landing = viaHelper ? (stageDir + stagedName) : destination;
-        var fetchTo = file.compressed ? (landing + ".gz") : landing;
 
-        var future = fileUtil.mkdirs(getParent(fetchTo));
-        future.then(this, function (f) {
-            var result = f.result;
-            f.nest(target.get(FILES_PATH + storedName, fetchTo, false, file.finalChecksum));
-        });
-        future.then(this, function (f) {
-            var result = f.result;
-            if (file.compressed) {
-                var gunzip = fileUtil.gunzip(fetchTo, landing);
-                gunzip.then(this, function (gf) {
-                    var gresult = gf.result;
-                    gf.nest(fileUtil.rmIfExists(fetchTo));
-                });
-                f.nest(gunzip);
-            } else {
-                f.result = {};
-            }
-        });
+        var future = fetchVerified(storedName, file, landing);
         future.then(this, function (f) {
             if (f.exception) {
-                // One missing file should not sink an entire restore — the
-                // store may have been pruned, or copied incompletely off USB.
+                // One missing or damaged file should not sink an entire
+                // restore - the store may have been pruned, or copied
+                // incompletely off USB. A damaged one is named as such, since
+                // it means the backup itself needs attention.
+                var mismatch = f.exception.checksumMismatch === true;
+                entry.failed = true;   // so postRestore is not told it is there
                 logger.warn("Unable to restore", file.path + ":", f.exception.message);
-                skipped.push({ path: file.path, reason: "fetch-failed" });
+                skipped.push({ path: file.path, reason: mismatch ? "checksum-mismatch" : "fetch-failed" });
                 f.result = {};
                 return;
             }
@@ -223,29 +207,68 @@ function RestoreAssistant() {
             return new Future({});
         }
         var landing = packagesDir + id + extension;
-        var fetchTo = fileDescriptor.compressed ? (landing + ".gz") : landing;
 
-        var future = target.get(FILES_PATH + backup.getServerFilename(fileDescriptor),
-            fetchTo, false, fileDescriptor.finalChecksum);
+        var future = fetchVerified(backup.getServerFilename(fileDescriptor), fileDescriptor, landing);
         future.then(this, function (f) {
             if (f.exception) {
-                // One missing file should not sink the whole restore - the
-                // caller checks existsSync and reports it as failed, same as
-                // restoreFile does for any other file.
+                // One missing or damaged file should not sink the whole
+                // restore - nothing lands, so the caller's existsSync reports
+                // it as failed, same as restoreFile does for any other file.
+                // That now includes a gzip that will not expand, which used to
+                // fail every package in the batch rather than just its own.
                 logger.warn("Unable to fetch", landing + ":", f.exception.message);
                 f.result = {};
                 return;
             }
-            if (fileDescriptor.compressed) {
-                var gunzip = fileUtil.gunzip(fetchTo, landing);
-                gunzip.then(this, function (gf) {
-                    var gresult = gf.result;
-                    gf.nest(fileUtil.rmIfExists(fetchTo));
-                });
-                f.nest(gunzip);
+            var result = f.result;
+            f.result = {};
+        });
+        return future;
+    };
+
+    /**
+     * Fetches one stored file to `landing`, or fails leaving nothing behind.
+     *
+     * The bytes go to an unguessable scratch name beside landing, are expanded
+     * there if compressed, are checked against the manifest's origChecksum, and
+     * only then are renamed into place. So a damaged store entry never reaches
+     * a service's postRestore or the root helper, and there is no predictable
+     * name ("<landing>.gz") for a writer of the temp dir to plant a symlink at
+     * in the window after restoreService clears it. The rename replaces
+     * whatever is at landing rather than writing through it.
+     */
+    var fetchVerified = function (storedName, descriptor, landing) {
+        var scratch = fileUtil.scratchName(landing);
+        var fetchTo = descriptor.compressed ? (scratch + ".gz") : scratch;
+
+        var future = fileUtil.mkdirs(getParent(landing));
+        future.then(this, function (f) {
+            var result = f.result;
+            f.nest(target.get(FILES_PATH + storedName, fetchTo, false, descriptor.finalChecksum));
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            if (descriptor.compressed) {
+                f.nest(fileUtil.gunzip(fetchTo, scratch));
             } else {
                 f.result = {};
             }
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            f.nest(fileUtil.verifyChecksum(scratch, descriptor.origChecksum));
+        });
+        future.then(this, function (f) {
+            var result = f.result;
+            f.nest(fileUtil.mv(scratch, landing));
+        });
+        future.then(this, function (f) {
+            // Success or failure, no scratch file stays behind (after a
+            // successful rename `scratch` is already gone). Reading f.result
+            // then rethrows a failure to the caller.
+            fileUtil.removeQuietly(descriptor.compressed ? [fetchTo, scratch] : [scratch]);
+            var result = f.result;
+            f.result = {};
         });
         return future;
     };
@@ -467,8 +490,13 @@ function RestoreAssistant() {
             }
             // Only what was accepted: a refused name must not reach the
             // service either, since db8 and systemservice join it onto
-            // tempDir themselves.
-            var filenames = accepted.map(function (entry) {
+            // tempDir themselves. And only what actually landed: a file that
+            // could not be fetched, or failed its checksum, is not in tempDir,
+            // and naming it would have the service read a missing file - or,
+            // before the checksum, a damaged one.
+            var filenames = accepted.filter(function (entry) {
+                return !entry.failed;
+            }).map(function (entry) {
                 return entry.file.path;
             });
             // No version here. The protocol's postRestore is

@@ -294,6 +294,73 @@ var fileUtil = (function () {
         return future;
     };
 
+    /**
+     * A sibling of target whose name nobody can predict, for fetching and
+     * expanding a restored file before it is renamed into place.
+     *
+     * A predictable scratch name ("<destination>.gz") lets anyone who can
+     * write that directory put a symlink there between restoreService clearing
+     * the temp dir and the fetch; the fetch runs as root on LuneOS and writes
+     * straight through it. An unguessable name leaves nothing to aim at.
+     *
+     * crypto.randomBytes arrived in node 0.5.8, so webOS 3.0.5's node 0.2 falls
+     * back to pid, time and Math.random - not a CSPRNG, but that platform's
+     * temp dir is on FAT, which cannot hold a symlink in the first place.
+     */
+    that.scratchName = function (target) {
+        var token;
+        try {
+            token = crypto.randomBytes(9).toString("hex");
+        } catch (err) {
+            token = process.pid + "-" + new Date().getTime() + "-" +
+                Math.floor(Math.random() * 0x7fffffff).toString(16);
+        }
+        return target + ".woce-" + token;
+    };
+
+    /**
+     * Checks that the file at filepath hashes to expected (the manifest's
+     * origChecksum: the md5 of the original, which is also its stored name).
+     * Fails with err.checksumMismatch set when it does not.
+     *
+     * This catches a store entry that was copied incompletely off USB or has
+     * rotted on the card - for an uncompressed file there is no gzip trailer to
+     * fail on otherwise. It is integrity, not authenticity: whoever can rewrite
+     * the store can rewrite the manifest to match.
+     *
+     * With no expected checksum (a stock-shaped entry that only has
+     * `checksum`) there is nothing to compare against, so it passes unchecked.
+     */
+    that.verifyChecksum = function (filepath, expected) {
+        if (!expected) {
+            return new Future({ verified: false });
+        }
+        var future = that.getChecksum(filepath);
+        future.then(this, function (f) {
+            var got = f.result;
+            if (got !== String(expected).toLowerCase()) {
+                var err = new Error("checksum mismatch: got " + got +
+                    ", the backup says " + JSON.stringify(String(expected)));
+                err.checksumMismatch = true;
+                throw err;
+            }
+            f.result = { verified: true };
+        });
+        return future;
+    };
+
+    /**
+     * Unlinks each path that exists, ignoring failures. Cleanup after a failed
+     * fetch, where the original error is the one worth reporting.
+     */
+    that.removeQuietly = function (paths) {
+        paths.forEach(function (p) {
+            try {
+                fs.unlinkSync(p);
+            } catch (ignored) {}
+        });
+    };
+
     // `gzip -d` rather than `gunzip`: busybox provides both on device, but only
     // gzip is reliably reachable off it, and one binary dependency is better
     // than two for identical behaviour.

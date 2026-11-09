@@ -167,6 +167,13 @@ entry that climbs out of its directory, names a destination outside the
 permitted roots, or runs through a symlink is skipped and reported rather than
 restored.
 
+Each file is fetched under an unguessable scratch name, expanded there,
+checked against the md5 of the original that the manifest records, and only
+then renamed into place. A store entry copied incompletely off USB, or rotted
+on the card, is skipped as `checksum-mismatch` and never handed to the
+service's `postRestore`. That is a check on integrity, not authenticity:
+whoever can rewrite the store can rewrite the manifest to match it.
+
 ---
 
 ## It installs as the stock Backup app

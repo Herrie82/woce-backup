@@ -1911,6 +1911,12 @@ async function main() {
         manifestDir: manifestDir
     });
 
+    /* ---- restore integrity and scratch names ---- */
+    await require("./restore-integrity")({
+        harness: harness, check: check, section: section, run: run,
+        buildServices: buildServices, ROOT: ROOT, manifestDir: manifestDir
+    });
+
     /* ---- saved passwords without a passphrase (rebuilds the sandbox) ---- */
     await require("./credentials-carry")({
         harness: harness, check: check, section: section, run: run,
