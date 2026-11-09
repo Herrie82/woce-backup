@@ -168,7 +168,8 @@ enyo.kind({
         // com.palm.app.backup read access. A third-party app cannot install
         // one, and db8 refuses the read outright, so the app talks to the
         // service and nothing else — which is the better boundary anyway.
-        { kind: "ApplicationEvents", onWindowActivated: "windowActivated" }
+        { kind: "ApplicationEvents", onWindowActivated: "windowActivated",
+          onApplicationRelaunch: "applicationRelaunched" }
     ],
 
     create: function () {
@@ -207,6 +208,28 @@ enyo.kind({
             enyo.bind(this, "initialLoadTimedOut"), this.initialLoadTimeout);
 
         this.refreshAll();
+    },
+
+    // Launched with {"restore": true} (first use's hand-off, see
+    // LaunchParams.js): straight to the restore flow, once there is a page
+    // to show it on.
+    rendered: function () {
+        this.inherited(arguments);
+        if (!this.launchHandled) {
+            this.launchHandled = true;
+            if (launchWantsRestore(enyo.windowParams)) {
+                this.showRestore();
+            }
+        }
+    },
+
+    // The same when the app is already open. Not in the middle of a backup:
+    // the card is only brought forward then, as for any other relaunch.
+    applicationRelaunched: function () {
+        if (launchWantsRestore(enyo.windowParams) && !this.backupInProgress) {
+            this.showRestore();
+        }
+        return false;
     },
 
     destroy: function () {

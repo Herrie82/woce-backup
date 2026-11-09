@@ -11,5 +11,6 @@ enyo.depends(
     "source/restore/RestoringPage.js",
     "source/restore/RestoreComponent.js",
 
+    "source/LaunchParams.js",
     "source/BackupApp.js"
 );

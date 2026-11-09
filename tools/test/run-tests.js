@@ -1917,6 +1917,9 @@ async function main() {
         buildServices: buildServices, ROOT: ROOT, manifestDir: manifestDir
     });
 
+    /* ---- the restore flow from a launch (app) ---- */
+    await require("./launch-restore")({ check: check, section: section });
+
     /* ---- saved passwords without a passphrase (rebuilds the sandbox) ---- */
     await require("./credentials-carry")({
         harness: harness, check: check, section: section, run: run,
