@@ -118,6 +118,13 @@ lives on, so including them uses storage twice over. The "What to back up"
 screen shows a live file count and size per category so the cost is visible
 before you switch one on.
 
+Launched with `{"restore": true}`, the app opens its restore flow, the same
+one as "Restore a backup..." in its menu, on a first launch or a relaunch
+(not during a backup); the user still picks the backup and confirms. LuneOS's
+first use uses this: restoring cannot happen while it runs, so it asks
+LunaAppManager to launch the app that way once setup is over. Only a JSON
+`true` counts.
+
 ## Where backups go
 
 ```
