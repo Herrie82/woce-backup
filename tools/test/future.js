@@ -19,7 +19,10 @@ var fs   = require('fs');
 var path = require('path');
 var vm   = require('vm');
 
-var DOCTOR_FUTURE = path.join(
+// FOUNDATIONS_FUTURE names another copy of the real file, for a machine
+// without the Doctor extract: a LuneOS device has one at
+// /usr/palm/frameworks/foundations/version/1.0/javascript/control/future.js.
+var DOCTOR_FUTURE = process.env.FOUNDATIONS_FUTURE || path.join(
     __dirname, "..", "..", "..",
     "touchpad", "305doctor", "resources", "webOS",
     "nova-cust-image-topaz.rootfs", "usr", "palm", "frameworks", "foundations",

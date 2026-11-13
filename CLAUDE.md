@@ -483,8 +483,24 @@ the app runs in limited mode and says so.
 # Runs against the REAL Foundations Future loaded from the Doctor extract.
 node tools/test/run-tests.js
 
+# Without the Doctor extract the suite falls back to a model Future (it warns).
+# Use a real one instead, e.g. pulled from a LuneOS device:
+#   /usr/palm/frameworks/foundations/version/1.0/javascript/control/future.js
+FOUNDATIONS_FUTURE=<path>/future.js node tools/test/run-tests.js
+
 # Enyo load-order check (build.sh runs this too)
 node tools/lint-enyo.js
+
+# UI: the real app in headless Chromium, luna mocked from tools/test/web/fixtures,
+# at every screen in SCREENS (Node 22+, Chromium). Needs the device's built
+# Enyo 0.10 once: adb -s <serial> pull /usr/palm/frameworks/enyo/0.10 test-output/enyo-0.10
+node tools/test/web/e2e-tests.js [--screenshots]
+
+# UI on a LuneOS device: pushes the checkout over the system install (saving
+# the original first), restarts the service, checks its build id, runs
+# tools/test/web/device-tests.js in the real WAM. Button taps sent over
+# DevTools do not reach Enyo 0.10 handlers under WAM, so those stay in e2e.
+tools/test-device.sh <serial> <name>          # --restore <serial> <name> to undo
 
 # Install — Preware or WebOS Quick Install, NOT palm-install (postinst needs root)
 palm-install build/com.palm.app.backup_1.1.0_all.ipk   # limited mode only

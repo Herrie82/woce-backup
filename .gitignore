@@ -2,3 +2,4 @@ build/
 com.palm.app.backup/device/
 *.ipk
 __pycache__/
+test-output/
