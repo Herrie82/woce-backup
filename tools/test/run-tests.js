@@ -331,8 +331,17 @@ async function main() {
     check("both service files stored", storedFiles.length === 2, "found " + storedFiles.length);
 
     var manifest = JSON.parse(fs.readFileSync(path.join(manifestDir(), manifests[0]), "utf8"));
-    check("manifest records both services", manifest.services.length === 2,
+    // Saved passwords are on by default; a run with no passphrase records the
+    // section with no files (nothing earlier to carry forward here) rather
+    // than leaving it out, so the restore side can say what happened.
+    var credSections = manifest.services.filter(function (s) {
+        return s.service === "com.palm.backup.credentials";
+    });
+    check("manifest records both services", manifest.services.length - credSections.length === 2,
         "found " + manifest.services.length);
+    check("passwords default on: a passphrase-less run records them as skipped",
+        credSections.length === 1 && (credSections[0].files || []).length === 0,
+        JSON.stringify(credSections));
     check("manifest size is non-zero", manifest.size > 0, String(manifest.size));
     check("manifest type is full", manifest.type === "full", manifest.type);
     check("postBackup was called", state.postBackupCalls === 1, String(state.postBackupCalls));
@@ -504,6 +513,13 @@ async function main() {
     });
     check("register succeeds", !reg.error, reg.error && reg.error.message);
 
+    // Passwords default to on, so switch the category off explicitly: this
+    // section is about what a restore does when the toggle is off.
+    await new Promise(function (resolve) {
+        vm.runInContext("__pwOff = prefs.set({ userData: { passwords: false } });", context);
+        context.__pwOff.settle(function () { resolve(); });
+    });
+
     var loaded = await new Promise(function (resolve) {
         vm.runInContext("__loaded = backup.loadRegisteredServices();", context);
         context.__loaded.settle(function (err, result) { resolve({ error: err, result: result }); });
@@ -515,9 +531,9 @@ async function main() {
         loaded.result["com.example.settings"] !== undefined);
 
     /* A restore must be able to hand a backup's saved passwords back even
-     * though the Passwords category is off, which is its default - and the
-     * default is exactly the state a device is in after the Doctor the backup
-     * was taken to survive. Gating the restore on the local toggle skipped the
+     * though the Passwords category is off - which is the state a device can
+     * be in after the Doctor the backup was taken to survive, if the user had
+     * switched it off. Gating the restore on the local toggle skipped the
      * very data the run was for, and did it silently. */
     check("passwords provider stays out of a backup while the category is off",
         loaded.result["com.palm.backup.credentials"] === undefined);

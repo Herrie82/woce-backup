@@ -156,7 +156,8 @@ Doctor, and onto different hardware. It also means **anyone with access to the
 device's USB storage can read your accounts and settings**. If that matters for
 your threat model, copy the backup somewhere safe and delete it from the device.
 
-Saved passwords are the exception. With the "Saved passwords" category on,
+Saved passwords are the exception, and the one category that is on by
+default. With the "Saved passwords" category on,
 `com.palm.keymanager` exports them encrypted under a backup passphrase you type
 in, and only a run that has the passphrase can make a fresh export. A run
 without one (the scheduled daily backup, say) does not leave the backup

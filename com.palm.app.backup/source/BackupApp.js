@@ -145,13 +145,22 @@ enyo.kind({
         { name: "passphraseDialog", className: "box-center popup", kind: "ModalDialog", lazy: false,
           caption: $L("Backup passphrase"), components: [
             { className: "backup-info-text",
-              content: $L("Choose a passphrase for your saved passwords. You will need the same one to restore them, and nothing else in the backup depends on it.") },
+              content: $L("Saved passwords are encrypted with this passphrase. You need it to restore them.") },
+            { className: "backup-info-text", style: "font-size: 0.85em; margin-top: 4px;",
+              content: $L("To stop asking, turn off Saved passwords in What to back up.") },
             { name: "passphraseInput", kind: "PasswordInput", hint: $L("Passphrase"),
               style: "margin: 10px 0;" },
+            { name: "passphraseError", className: "backup-info-text", showing: false,
+              style: "color: #c00;",
+              content: $L("Enter a passphrase, or tap Skip.") },
+            // Equal thirds rather than natural widths, so the row stays inside
+            // the popup's 420px (92% on narrow screens) at any label length.
             { layoutKind: "HFlexLayout", pack: "center", components: [
-                { kind: "Button", caption: $L("Cancel"), onclick: "passphraseCancel",
-                  style: "margin-right: 10px" },
-                { kind: "Button", className: "enyo-button-affirmative",
+                { kind: "Button", flex: 1, caption: $L("Cancel"), onclick: "passphraseCancel",
+                  style: "margin-right: 6px" },
+                { kind: "Button", flex: 1, caption: $L("Skip"), onclick: "passphraseSkip",
+                  style: "margin-right: 6px" },
+                { kind: "Button", flex: 1, className: "enyo-button-affirmative",
                   caption: $L("Back up"), onclick: "passphraseAccept" }
             ]}
         ]},
@@ -537,6 +546,7 @@ enyo.kind({
             // the setter may not exist, and a throw inside a click handler is
             // invisible except as a button that does nothing.
             this.$.passphraseInput.setValue("");
+            this.$.passphraseError.hide();
             this.$.passphraseDialog.openAtCenter();
             return;
         }
@@ -546,13 +556,35 @@ enyo.kind({
 
     /** The passphrase prompt's affirmative button. */
     passphraseAccept: function () {
+        // An empty passphrase is not a passphrase: passed on, it reaches the
+        // service as "none given", which skips the export - the same as Skip
+        // the Skip button, but behind the button that says it will back them up.
+        // Keep the dialog open and say so instead.
+        var value = this.$.passphraseInput.getValue();
+        if (!value) {
+            this.$.passphraseError.show();
+            return;
+        }
+        this.$.passphraseError.hide();
         this.$.passphraseDialog.close();
-        this.pendingPassphrase = this.$.passphraseInput.getValue();
+        this.pendingPassphrase = value;
         this.$.passphraseInput.setValue("");
         // Straight to beginBackup, not back through startBackup: routing back
         // through it needed a flag to stop it reopening the dialog it had just
         // answered, and a re-entrancy guard for a straight line is a trap for
         // whoever edits it next.
+        this.beginBackup(this.pendingFullBackup);
+    },
+
+    /**
+     * Back up without a passphrase, this run only. The service then carries
+     * the previous run's encrypted export forward, the same as the scheduled
+     * backup does, so the category stays on and nothing is lost.
+     */
+    passphraseSkip: function () {
+        this.$.passphraseDialog.close();
+        this.$.passphraseInput.setValue("");
+        this.pendingPassphrase = null;
         this.beginBackup(this.pendingFullBackup);
     },
 

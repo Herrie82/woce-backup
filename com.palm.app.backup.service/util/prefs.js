@@ -27,10 +27,13 @@ var prefs = (function () {
         documents: false,
         downloads: false,
         ringtones: false,
-        // Not media, but it belongs in the same "what to back up" selection and
-        // shares its off-by-default reasoning: a woce backup is unencrypted, so
-        // including credentials has to be an explicit choice.
-        passwords: false
+        // Not media, but it belongs in the same "what to back up" selection.
+        // On by default, unlike the media categories: the export is a few
+        // kilobytes and leaves keymanager encrypted under a passphrase the user
+        // types in at backup time, so it costs neither space nor exposure. A
+        // run with no passphrase (the scheduled daily backup) skips the fresh
+        // export and carries the previous one forward - see credentials.js.
+        passwords: true
     };
 
     var DEFAULTS = {
